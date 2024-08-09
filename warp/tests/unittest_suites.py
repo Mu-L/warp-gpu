@@ -120,6 +120,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_generics import TestGenerics
     from warp.tests.test_grad import TestGrad
     from warp.tests.test_grad_customs import TestGradCustoms
+    from warp.tests.test_grad_debug import TestGradDebug
     from warp.tests.test_hash_grid import TestHashGrid
     from warp.tests.test_import import TestImport
     from warp.tests.test_indexedarray import TestIndexedArray
@@ -150,6 +151,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_noise import TestNoise
     from warp.tests.test_operators import TestOperators
     from warp.tests.test_options import TestOptions
+    from warp.tests.test_overwrite import TestOverwrite
     from warp.tests.test_peer import TestPeer
     from warp.tests.test_pinned import TestPinned
     from warp.tests.test_print import TestPrint
@@ -212,6 +214,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestGenerics,
         TestGrad,
         TestGradCustoms,
+        TestGradDebug,
         TestHashGrid,
         TestImport,
         TestIndexedArray,
@@ -242,6 +245,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestNoise,
         TestOperators,
         TestOptions,
+        TestOverwrite,
         TestPeer,
         TestPinned,
         TestPrint,
@@ -293,6 +297,7 @@ def kit_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_func import TestFunc
     from warp.tests.test_generics import TestGenerics
     from warp.tests.test_grad_customs import TestGradCustoms
+    from warp.tests.test_grad_debug import TestGradDebug
     from warp.tests.test_hash_grid import TestHashGrid
     from warp.tests.test_indexedarray import TestIndexedArray
     from warp.tests.test_launch import TestLaunch
@@ -336,6 +341,7 @@ def kit_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestFunc,
         TestGenerics,
         TestGradCustoms,
+        TestGradDebug,
         TestHashGrid,
         TestIndexedArray,
         TestLaunch,

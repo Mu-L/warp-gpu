@@ -17,6 +17,7 @@ def test_vector_constructor_value_func():
     b = wp.vector(a, dtype=wp.float16)
     c = wp.vector(a)
     d = wp.vector(a, length=2)
+    e = wp.vector(1.0, length=3)
 
 
 # Test matrix constructors using explicit type (float16)
@@ -67,5 +68,5 @@ add_kernel_test(TestVecLite, test_constructors_default_precision, dim=1, devices
 
 
 if __name__ == "__main__":
-    wp.build.clear_kernel_cache()
+    wp.clear_kernel_cache()
     unittest.main(verbosity=2, failfast=True)

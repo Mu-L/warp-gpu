@@ -98,7 +98,7 @@ class CubeTripolynomialShapeFunctions:
 
                 # x face
                 type_instance = mi
-                type_index = wp.select(mi == 1, (j - 1) * (ORDER - 1) + k - 1, (k - 1) * (ORDER - 1) + j - 1)
+                type_index = (j - 1) * (ORDER - 1) + k - 1
                 return CubeTripolynomialShapeFunctions.FACE, type_instance, type_index
 
             if zj + mj == 1:
@@ -110,13 +110,13 @@ class CubeTripolynomialShapeFunctions:
 
                 # y face
                 type_instance = 2 + mj
-                type_index = wp.select(mj == 1, (i - 1) * (ORDER - 1) + k - 1, (k - 1) * (ORDER - 1) + i - 1)
+                type_index = (k - 1) * (ORDER - 1) + i - 1
                 return CubeTripolynomialShapeFunctions.FACE, type_instance, type_index
 
             if zk + mk == 1:
                 # z face
                 type_instance = 4 + mk
-                type_index = wp.select(mk == 1, (j - 1) * (ORDER - 1) + i - 1, (i - 1) * (ORDER - 1) + j - 1)
+                type_index = (i - 1) * (ORDER - 1) + j - 1
                 return CubeTripolynomialShapeFunctions.FACE, type_instance, type_index
 
             type_index = ((i - 1) * (ORDER - 1) + (j - 1)) * (ORDER - 1) + k - 1
@@ -321,6 +321,87 @@ class CubeTripolynomialShapeFunctions:
         from warp.fem.utils import grid_to_tets
 
         return grid_to_tets(self.ORDER, self.ORDER, self.ORDER)
+
+    def element_vtk_cells(self):
+        n = self.ORDER + 1
+
+        # vertices
+        cells = [
+            [
+                [0, 0, 0],
+                [n - 1, 0, 0],
+                [n - 1, n - 1, 0],
+                [0, n - 1, 0],
+                [0, 0, n - 1],
+                [n - 1, 0, n - 1],
+                [n - 1, n - 1, n - 1],
+                [0, n - 1, n - 1],
+            ]
+        ]
+
+        if self.ORDER == 1:
+            cell_type = 12  # vtk_hexahedron
+        else:
+            middle = np.arange(1, n - 1)
+            front = np.zeros(n - 2, dtype=int)
+            back = np.full(n - 2, n - 1)
+
+            # edges
+            cells.append(np.column_stack((middle, front, front)))
+            cells.append(np.column_stack((back, middle, front)))
+            cells.append(np.column_stack((middle, back, front)))
+            cells.append(np.column_stack((front, middle, front)))
+
+            cells.append(np.column_stack((middle, front, back)))
+            cells.append(np.column_stack((back, middle, back)))
+            cells.append(np.column_stack((middle, back, back)))
+            cells.append(np.column_stack((front, middle, back)))
+
+            cells.append(np.column_stack((front, front, middle)))
+            cells.append(np.column_stack((back, front, middle)))
+            cells.append(np.column_stack((back, back, middle)))
+            cells.append(np.column_stack((front, back, middle)))
+
+            # faces
+
+            face = np.meshgrid(middle, middle)
+            front = np.zeros((n - 2) ** 2, dtype=int)
+            back = np.full((n - 2) ** 2, n - 1)
+
+            # YZ
+            cells.append(
+                np.column_stack((front, face[0].flatten(), face[1].flatten())),
+            )
+            cells.append(
+                np.column_stack((back, face[0].flatten(), face[1].flatten())),
+            )
+            # XZ
+            cells.append(
+                np.column_stack((face[0].flatten(), front, face[1].flatten())),
+            )
+            cells.append(
+                np.column_stack((face[0].flatten(), back, face[1].flatten())),
+            )
+            # XY
+            cells.append(
+                np.column_stack((face[0].flatten(), face[1].flatten(), front)),
+            )
+            cells.append(
+                np.column_stack((face[0].flatten(), face[1].flatten(), back)),
+            )
+
+            # interior
+            interior = np.meshgrid(middle, middle, middle)
+            cells.append(
+                np.column_stack((interior[0].flatten(), interior[1].flatten(), interior[2].flatten())),
+            )
+
+            cell_type = 72  # vtk_lagrange_hexahedron
+
+        cells = np.concatenate(cells)
+        cell_indices = cells[:, 0] * n * n + cells[:, 1] * n + cells[:, 2]
+
+        return cell_indices[np.newaxis, :], np.array([cell_type], dtype=np.int8)
 
 
 class CubeSerendipityShapeFunctions:
@@ -632,6 +713,12 @@ class CubeSerendipityShapeFunctions:
 
         raise NotImplementedError()
 
+    def element_vtk_cells(self):
+        tets = np.array(self.element_node_tets())
+        cell_type = 10  # VTK_TETRA
+
+        return tets, np.full(tets.shape[0], cell_type, dtype=np.int8)
+
 
 class CubeNonConformingPolynomialShapeFunctions:
     # embeds the largest regular tet centered at (0.5, 0.5, 0.5) into the reference cube
@@ -656,6 +743,7 @@ class CubeNonConformingPolynomialShapeFunctions:
         self.NODES_PER_ELEMENT = self._tet_shape.NODES_PER_ELEMENT
 
         self.element_node_tets = self._tet_shape.element_node_tets
+        self.element_vtk_cells = self._tet_shape.element_vtk_cells
 
     @property
     def name(self) -> str:

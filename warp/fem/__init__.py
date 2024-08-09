@@ -1,7 +1,17 @@
 from .cache import TemporaryStore, borrow_temporary, borrow_temporary_like, set_default_temporary_store
 from .dirichlet import normalize_dirichlet_projector, project_linear_system
-from .domain import BoundarySides, Cells, FrontierSides, GeometryDomain, Sides
-from .field import DiscreteField, FieldLike, make_restriction, make_test, make_trial
+from .domain import BoundarySides, Cells, FrontierSides, GeometryDomain, Sides, Subdomain
+from .field import (
+    DiscreteField,
+    FieldLike,
+    ImplicitField,
+    NonconformingField,
+    UniformField,
+    make_discrete_field,
+    make_restriction,
+    make_test,
+    make_trial,
+)
 from .geometry import (
     ExplicitGeometryPartition,
     Geometry,
@@ -58,4 +68,4 @@ from .space import (
     make_space_partition,
     make_space_restriction,
 )
-from .types import Coords, Domain, ElementIndex, Field, Sample
+from .types import NULL_ELEMENT_INDEX, Coords, Domain, ElementIndex, Field, Sample, make_free_sample

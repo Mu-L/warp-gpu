@@ -1,5 +1,7 @@
+import ast
 import bisect
 import re
+import weakref
 from copy import copy
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -17,7 +19,7 @@ def _make_key(obj, suffix: str, use_qualified_name):
     return _key_re.sub("", f"{base_name}_{suffix}")
 
 
-def get_func(func, suffix: str, use_qualified_name: bool = False):
+def get_func(func, suffix: str, use_qualified_name: bool = False, code_transformers=None):
     key = _make_key(func, suffix, use_qualified_name)
 
     if key not in _func_cache:
@@ -28,14 +30,15 @@ def get_func(func, suffix: str, use_qualified_name: bool = False):
             module=wp.get_module(
                 func.__module__,
             ),
+            code_transformers=code_transformers,
         )
 
     return _func_cache[key]
 
 
-def dynamic_func(suffix: str, use_qualified_name=False):
+def dynamic_func(suffix: str, use_qualified_name=False, code_transformers=None):
     def wrap_func(func: Callable):
-        return get_func(func, suffix=suffix, use_qualified_name=use_qualified_name)
+        return get_func(func, suffix=suffix, use_qualified_name=use_qualified_name, code_transformers=code_transformers)
 
     return wrap_func
 
@@ -96,6 +99,92 @@ def dynamic_struct(suffix: str, use_qualified_name=False):
     return wrap_struct
 
 
+def get_argument_struct(arg_types: Dict[str, type]):
+    class Args:
+        pass
+
+    annotations = wp.codegen.get_annotations(Args)
+
+    for name, arg_type in arg_types.items():
+        setattr(Args, name, None)
+        annotations[name] = arg_type
+
+    def arg_type_name(arg_type):
+        return wp.types.get_type_code(wp.types.type_to_warp(arg_type))
+
+    try:
+        Args.__annotations__ = annotations
+    except AttributeError:
+        Args.__dict__.__annotations__ = annotations
+
+    suffix = "_".join([f"{name}_{arg_type_name(arg_type)}" for name, arg_type in annotations.items()])
+
+    return get_struct(Args, suffix=suffix)
+
+
+def populate_argument_struct(Args: wp.codegen.Struct, values: Dict[str, Any], func_name: str):
+    if values is None:
+        values = {}
+
+    value_struct_values = Args()
+    for k, v in values.items():
+        try:
+            setattr(value_struct_values, k, v)
+        except Exception as err:
+            if k not in Args.vars:
+                raise ValueError(
+                    f"Passed value argument '{k}' does not match any of the function '{func_name}' parameters"
+                ) from err
+            raise ValueError(
+                f"Passed value argument '{k}' of type '{wp.types.type_repr(v)}' is incompatible with the function '{func_name}' parameter of type '{wp.types.type_repr(Args.vars[k].type)}'"
+            ) from err
+
+    missing_values = Args.vars.keys() - values.keys()
+    if missing_values:
+        wp.utils.warn(
+            f"Missing values for parameter(s) '{', '.join(missing_values)}' of the function '{func_name}', will be zero-initialized"
+        )
+
+    return value_struct_values
+
+
+class ExpandStarredArgumentStruct(ast.NodeTransformer):
+    def __init__(
+        self,
+        structs: Dict[str, wp.codegen.Struct],
+    ):
+        self._structs = structs
+
+    @staticmethod
+    def _build_path(path, node):
+        if isinstance(node, ast.Attribute):
+            ExpandStarredArgumentStruct._build_path(path, node.value)
+            path.append(node.attr)
+        if isinstance(node, ast.Name):
+            path.append(node.id)
+        return path
+
+    def _get_expanded_struct(self, arg_node):
+        if not isinstance(arg_node, ast.Starred):
+            return None
+        path = ".".join(ExpandStarredArgumentStruct._build_path([], arg_node.value))
+        return self._structs.get(path, None)
+
+    def visit_Call(self, call: ast.Call):
+        call = self.generic_visit(call)
+
+        expanded_args = []
+        for arg in call.args:
+            struct = self._get_expanded_struct(arg)
+            if struct is None:
+                expanded_args.append(arg)
+            else:
+                expanded_args += [ast.Attribute(value=arg.value, attr=field) for field in struct.vars.keys()]
+        call.args = expanded_args
+
+        return call
+
+
 def get_integrand_function(
     integrand: "warp.fem.operator.Integrand",  # noqa: F821
     suffix: str,
@@ -103,9 +192,6 @@ def get_integrand_function(
     annotations=None,
     code_transformers=None,
 ):
-    if code_transformers is None:
-        code_transformers = []
-
     key = _make_key(integrand.func, suffix, use_qualified_name=True)
 
     if key not in _func_cache:
@@ -130,9 +216,6 @@ def get_integrand_kernel(
 ):
     if kernel_options is None:
         kernel_options = {}
-
-    if code_transformers is None:
-        code_transformers = []
 
     key = _make_key(integrand.func, suffix, use_qualified_name=True)
 
@@ -198,10 +281,21 @@ class Temporary:
     The temporary may also be explicitly returned to the pool before destruction using :meth:`release`.
     """
 
+    def __new__(cls, *args, **kwargs):
+        instance = super(Temporary, cls).__new__(cls)
+        instance._pool = None
+        return instance
+
     def __init__(self, array: wp.array, pool: Optional["TemporaryStore.Pool"] = None, shape=None, dtype=None):
         self._raw_array = array
         self._array_view = array
         self._pool = pool
+
+        if pool is not None and wp.context.runtime.tape is not None:
+            # Extend lifetime to that of Tape (or Pool if shorter)
+            # This is to prevent temporary arrays held in tape launch parameters to be redeemed
+            pool.hold(self)
+            weakref.finalize(wp.context.runtime.tape, TemporaryStore.Pool.stop_holding, pool, self)
 
         if shape is not None or dtype is not None:
             self._view_as(shape=shape, dtype=dtype)
@@ -270,6 +364,8 @@ class TemporaryStore:
             self._pool_sizes = []  # Sizes of available arrays for borrowing, ascending
             self._allocs = {}  # All allocated arrays, including borrowed ones
 
+            self._held_temporaries = set()  # Temporaries that are prevented from going out of scope
+
         def borrow(self, shape, dtype, requires_grad: bool):
             size = 1
             if isinstance(shape, int):
@@ -285,8 +381,12 @@ class TemporaryStore:
                 # Big enough array found, remove from pool
                 array = self._pool.pop(index)
                 self._pool_sizes.pop(index)
-                if requires_grad and array.grad is None:
-                    array.requires_grad = True
+                if requires_grad:
+                    if array.grad is None:
+                        array.requires_grad = True
+                    else:
+                        # Zero-out existing gradient to mimic semantics of wp.empty()
+                        array.grad.zero_()
                 return Temporary(pool=self, array=array, shape=shape, dtype=dtype)
 
             # No big enough array found, allocate new one
@@ -311,6 +411,12 @@ class TemporaryStore:
 
         def detach(self, array):
             del self._allocs[array.ptr]
+
+        def hold(self, temp: Temporary):
+            self._held_temporaries.add(temp)
+
+        def stop_holding(self, temp: Temporary):
+            self._held_temporaries.remove(temp)
 
     def __init__(self):
         self.clear()
@@ -401,3 +507,47 @@ def borrow_temporary_like(
         device=array.device,
         requires_grad=array.requires_grad,
     )
+
+
+_device_events = {}
+
+
+def capture_event(device=None):
+    """
+    Records a CUDA event on the current stream and returns it,
+    reusing previously created events if possible.
+
+    If the current device is not a CUDA device, returns ``None``.
+
+    The event can be returned to the shared per-device pool for future reuse by
+    calling :func:`synchronize_event`
+    """
+
+    device = wp.get_device(device)
+    if not device.is_cuda:
+        return None
+
+    try:
+        device_events = _device_events[device.ordinal]
+    except KeyError:
+        device_events = []
+        _device_events[device.ordinal] = device_events
+
+    with wp.ScopedDevice(device):
+        if not device_events:
+            return wp.record_event()
+
+        return wp.record_event(device_events.pop())
+
+
+def synchronize_event(event: Union[wp.Event, None]):
+    """
+    Synchronize an event created with :func:`capture_event` and returns it to the
+    per-device event pool.
+
+    If `event` is ``None``, do nothing.
+    """
+
+    if event is not None:
+        wp.synchronize_event(event)
+        _device_events[event.device.ordinal].append(event)

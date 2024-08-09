@@ -1,3 +1,5 @@
+from enum import Enum
+
 import warp as wp
 
 # kept to avoid breaking existing example code, no longer used internally
@@ -14,7 +16,7 @@ NodeIndex = int
 
 NULL_ELEMENT_INDEX = wp.constant(-1)
 NULL_QP_INDEX = wp.constant(-1)
-NULL_NODE_INDEX = wp.constant(-1)
+NULL_NODE_INDEX = wp.constant((1 << 31) - 1)  # this should be larger than normal nodes when sorting
 
 DofIndex = wp.vec2i
 """Opaque descriptor for indexing degrees of freedom within elements"""
@@ -29,6 +31,11 @@ def get_node_index_in_element(dof_idx: DofIndex):
 @wp.func
 def get_node_coord(dof_idx: DofIndex):
     return dof_idx[1]
+
+
+class ElementKind(Enum):
+    CELL = 0
+    SIDE = 1
 
 
 @wp.struct

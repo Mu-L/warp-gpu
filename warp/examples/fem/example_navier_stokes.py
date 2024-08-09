@@ -18,27 +18,18 @@
 ###########################################################################
 
 import warp as wp
+import warp.examples.fem.utils as fem_example_utils
 import warp.fem as fem
 from warp.fem.utils import array_axpy
-from warp.sparse import bsr_copy, bsr_mm, bsr_mv
-
-try:
-    from .bsr_utils import SaddleSystem, bsr_solve_saddle
-    from .mesh_utils import gen_trimesh
-    from .plot_utils import Plot
-except ImportError:
-    from bsr_utils import SaddleSystem, bsr_solve_saddle
-    from mesh_utils import gen_trimesh
-    from plot_utils import Plot
 
 
-@fem.integrand
-def u_boundary_value(s: fem.Sample, domain: fem.Domain, v: fem.Field, top_vel: float):
+@wp.func
+def u_boundary_value(x: wp.vec2, box_height: float, top_velocity: float):
     # Horizontal velocity on top of domain, zero elsewhere
-    if domain(s)[1] == 1.0:
-        return wp.dot(wp.vec2f(top_vel, 0.0), v(s))
+    if x[1] >= box_height:
+        return wp.vec2(top_velocity, 0.0)
 
-    return wp.dot(wp.vec2f(0.0, 0.0), v(s))
+    return wp.vec2(0.0, 0.0)
 
 
 @fem.integrand
@@ -100,8 +91,8 @@ class Example:
         viscosity = top_velocity / Re
 
         if tri_mesh:
-            positions, tri_vidx = gen_trimesh(res=wp.vec2i(res))
-            geo = fem.Trimesh2D(tri_vertex_indices=tri_vidx, positions=positions)
+            positions, tri_vidx = fem_example_utils.gen_trimesh(res=wp.vec2i(res))
+            geo = fem.Trimesh2D(tri_vertex_indices=tri_vidx, positions=positions, build_bvh=True)
         else:
             geo = fem.Grid2D(res=wp.vec2i(res))
 
@@ -132,10 +123,14 @@ class Example:
         u_bd_test = fem.make_test(space=u_space, domain=boundary)
         u_bd_trial = fem.make_trial(space=u_space, domain=boundary)
         u_bd_projector = fem.integrate(mass_form, fields={"u": u_bd_trial, "v": u_bd_test}, nodal=True)
+
+        # Define an implicit field for our boundary condition value and integrate
+        u_bd_field = fem.ImplicitField(
+            domain=boundary, func=u_boundary_value, values={"top_velocity": top_velocity, "box_height": 1.0}
+        )
         u_bd_value = fem.integrate(
-            u_boundary_value,
-            fields={"v": u_bd_test},
-            values={"top_vel": top_velocity},
+            mass_form,
+            fields={"u": u_bd_field, "v": u_bd_test},
             nodal=True,
             output_dtype=wp.vec2d,
         )
@@ -145,15 +140,11 @@ class Example:
         u_bd_rhs = wp.zeros_like(u_bd_value)
         fem.project_linear_system(u_matrix, u_bd_rhs, u_bd_projector, u_bd_value, normalize_projector=False)
 
-        # div_bd_rhs = div_matrix * u_bd_rhs
-        div_bd_rhs = wp.zeros(shape=(div_matrix.nrow,), dtype=div_matrix.scalar_type)
-        bsr_mv(div_matrix, u_bd_value, y=div_bd_rhs, alpha=-1.0)
-
-        # div_matrix = div_matrix - div_matrix * bd_projector
-        bsr_mm(x=bsr_copy(div_matrix), y=u_bd_projector, z=div_matrix, alpha=-1.0, beta=1.0)
+        div_bd_rhs = -div_matrix @ u_bd_value
+        div_matrix -= div_matrix @ u_bd_projector
 
         # Assemble saddle system
-        self._saddle_system = SaddleSystem(u_matrix, div_matrix)
+        self._saddle_system = fem_example_utils.SaddleSystem(u_matrix, div_matrix)
 
         # Save data for computing time steps rhs
         self._u_bd_projector = u_bd_projector
@@ -165,8 +156,8 @@ class Example:
         self._u_field = u_space.make_field()
         self._p_field = p_space.make_field()
 
-        self.renderer = Plot()
-        self.renderer.add_surface_vector("velocity", self._u_field)
+        self.renderer = fem_example_utils.Plot()
+        self.renderer.add_field("velocity", self._u_field)
 
     def step(self):
         self.current_frame += 1
@@ -180,7 +171,7 @@ class Example:
 
         # Apply boundary conditions
         # u_rhs = (I - P) * u_rhs + u_bd_rhs
-        bsr_mv(self._u_bd_projector, x=u_rhs, y=u_rhs, alpha=-1.0, beta=1.0)
+        wp.sparse.bsr_mv(self._u_bd_projector, x=u_rhs, y=u_rhs, alpha=-1.0, beta=1.0)
         array_axpy(x=self._u_bd_rhs, y=u_rhs, alpha=1.0, beta=1.0)
 
         p_rhs = self._div_bd_rhs
@@ -190,7 +181,7 @@ class Example:
         wp.utils.array_cast(out_array=x_u, in_array=self._u_field.dof_values)
         wp.utils.array_cast(out_array=x_p, in_array=self._p_field.dof_values)
 
-        bsr_solve_saddle(
+        fem_example_utils.bsr_solve_saddle(
             saddle_system=self._saddle_system,
             tol=1.0e-6,
             x_u=x_u,
@@ -205,7 +196,7 @@ class Example:
 
     def render(self):
         self.renderer.begin_frame(time=self.current_frame * self.sim_dt)
-        self.renderer.add_surface_vector("velocity", self._u_field)
+        self.renderer.add_field("velocity", self._u_field)
         self.renderer.end_frame()
 
 
@@ -251,7 +242,12 @@ if __name__ == "__main__":
             example.step()
             example.render()
 
-        example.renderer.add_surface_vector("velocity_final", example._u_field)
+        example.renderer.add_field("velocity_final", example._u_field)
 
         if not args.headless:
-            example.renderer.plot(streamlines={"velocity_final"})
+            example.renderer.plot(
+                options={
+                    "velocity": {"arrows": {"glyph_scale": 0.25}},
+                    "velocity_final": {"streamlines": {"density": 2.0}},
+                }
+            )

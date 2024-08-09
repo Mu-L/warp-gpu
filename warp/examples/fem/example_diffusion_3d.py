@@ -17,21 +17,10 @@
 ###########################################################################
 
 import warp as wp
+import warp.examples.fem.utils as fem_example_utils
 import warp.fem as fem
+from warp.examples.fem.example_diffusion import diffusion_form, linear_form
 from warp.sparse import bsr_axpy
-
-# Import example utilities
-# Make sure that works both when imported as module and run as standalone file
-try:
-    from .bsr_utils import bsr_cg
-    from .example_diffusion import diffusion_form, linear_form
-    from .mesh_utils import gen_hexmesh, gen_tetmesh
-    from .plot_utils import Plot
-except ImportError:
-    from bsr_utils import bsr_cg
-    from example_diffusion import diffusion_form, linear_form
-    from mesh_utils import gen_hexmesh, gen_tetmesh
-    from plot_utils import Plot
 
 
 @fem.integrand
@@ -41,8 +30,9 @@ def vert_boundary_projector_form(
     u: fem.Field,
     v: fem.Field,
 ):
-    # Non-zero mass on vertical sides only
-    w = 1.0 - wp.abs(fem.normal(domain, s)[1])
+    # Constrain XY and YZ faces
+    nor = fem.normal(domain, s)
+    w = 1.0 - wp.abs(nor[1])
     return w * u(s) * v(s)
 
 
@@ -62,30 +52,36 @@ class Example:
         self._viscosity = viscosity
         self._boundary_compliance = boundary_compliance
 
-        res = wp.vec3i(resolution, resolution // 2, resolution * 2)
+        res = wp.vec3i(resolution, max(1, resolution // 2), resolution * 2)
+        bounds_lo = wp.vec3(0.0, 0.0, 0.0)
+        bounds_hi = wp.vec3(1.0, 0.5, 2.0)
 
         if mesh == "tet":
-            pos, tet_vtx_indices = gen_tetmesh(
+            pos, tet_vtx_indices = fem_example_utils.gen_tetmesh(
                 res=res,
-                bounds_lo=wp.vec3(0.0, 0.0, 0.0),
-                bounds_hi=wp.vec3(1.0, 0.5, 2.0),
+                bounds_lo=bounds_lo,
+                bounds_hi=bounds_hi,
             )
             self._geo = fem.Tetmesh(tet_vtx_indices, pos)
         elif mesh == "hex":
-            pos, hex_vtx_indices = gen_hexmesh(
+            pos, hex_vtx_indices = fem_example_utils.gen_hexmesh(
                 res=res,
-                bounds_lo=wp.vec3(0.0, 0.0, 0.0),
-                bounds_hi=wp.vec3(1.0, 0.5, 2.0),
+                bounds_lo=bounds_lo,
+                bounds_hi=bounds_hi,
             )
             self._geo = fem.Hexmesh(hex_vtx_indices, pos)
         elif mesh == "nano":
-            volume = wp.Volume.allocate(min=[0, 0, 0], max=[1.0, 0.5, 2.0], voxel_size=1.0 / res[0], bg_value=None)
+            volume = fem_example_utils.gen_volume(
+                res=res,
+                bounds_lo=bounds_lo,
+                bounds_hi=bounds_hi,
+            )
             self._geo = fem.Nanogrid(volume)
         else:
             self._geo = fem.Grid3D(
                 res=res,
-                bounds_lo=wp.vec3(0.0, 0.0, 0.0),
-                bounds_hi=wp.vec3(1.0, 0.5, 2.0),
+                bounds_lo=bounds_lo,
+                bounds_hi=bounds_hi,
             )
 
         # Domain and function spaces
@@ -95,7 +91,7 @@ class Example:
         # Scalar field over our function space
         self._scalar_field: fem.DiscreteField = self._scalar_space.make_field()
 
-        self.renderer = Plot()
+        self.renderer = fem_example_utils.Plot()
 
     def step(self):
         geo = self._geo
@@ -129,11 +125,11 @@ class Example:
 
         with wp.ScopedTimer("CG solve"):
             x = wp.zeros_like(rhs)
-            bsr_cg(matrix, b=rhs, x=x, quiet=self._quiet)
+            fem_example_utils.bsr_cg(matrix, b=rhs, x=x, quiet=self._quiet)
             self._scalar_field.dof_values = x
 
     def render(self):
-        self.renderer.add_volume("solution", self._scalar_field)
+        self.renderer.add_field("solution", self._scalar_field)
 
 
 if __name__ == "__main__":

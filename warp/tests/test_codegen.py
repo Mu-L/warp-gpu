@@ -425,6 +425,88 @@ def test_error_global_var(test, device):
         wp.launch(kernel, dim=out.shape, inputs=(), outputs=(out,))
 
 
+def test_error_collection_construct(test, device):
+    def kernel_1_fn():
+        x = [1.0, 2.0, 3.0]
+
+    def kernel_2_fn():
+        x = (1.0, 2.0, 3.0)
+
+    def kernel_3_fn():
+        x = {"a": 1.0, "b": 2.0, "c": 3.0}
+
+    def kernel_4_fn():
+        wp.length((1.0, 2.0, 3.0))
+
+    kernel = wp.Kernel(func=kernel_1_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"List constructs are not supported in kernels. Use vectors like `wp.vec3\(\)` for small collections instead.",
+    ):
+        wp.launch(kernel, dim=1)
+
+    kernel = wp.Kernel(func=kernel_2_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Tuple constructs are not supported in kernels. Use vectors like `wp.vec3\(\)` for small collections instead.",
+    ):
+        wp.launch(kernel, dim=1)
+
+    kernel = wp.Kernel(func=kernel_3_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Construct `ast.Dict` not supported in kernels.",
+    ):
+        wp.launch(kernel, dim=1)
+
+    kernel = wp.Kernel(func=kernel_4_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Tuple constructs are not supported in kernels. Use vectors like `wp.vec3\(\)` instead.",
+    ):
+        wp.launch(kernel, dim=1)
+
+
+def test_error_unmatched_arguments(test, device):
+    def kernel_1_fn():
+        a = 1 * 1.0
+
+    def kernel_2_fn():
+        x = wp.dot(wp.vec2(1.0, 2.0), wp.vec2h(wp.float16(1.0), wp.float16(2.0)))
+
+    kernel = wp.Kernel(func=kernel_1_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Input types must be the same, got \['int32', 'float32'\]",
+    ):
+        wp.launch(kernel, dim=1)
+
+    kernel = wp.Kernel(func=kernel_2_fn)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Input types must be exactly the same, got \[\"vector\(length=2, dtype=<class 'warp.types.float32'>\)\", \"vector\(length=2, dtype=<class 'warp.types.float16'>\)\"\]",
+    ):
+        wp.launch(kernel, dim=1)
+
+
+@wp.kernel
+def test_call_syntax():
+    expected_pow = 16.0
+    wp.expect_eq(wp.pow(2.0, 4.0), expected_pow)
+    wp.expect_eq(wp.pow(x=2.0, y=4.0), expected_pow)
+    wp.expect_eq(wp.pow(2.0, y=4.0), expected_pow)
+    wp.expect_eq(wp.pow(y=4.0, x=2.0), expected_pow)
+
+    expected_matrix = wp.mat44(2.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 2.0, 0.0, 0.0, 4.0, 3.0, 0.0, 0.0, 0.0, 1.0)
+    pos = wp.vec3(1.0, 2.0, 3.0)
+    rot = wp.quat(0.0, 0.0, 0.0, 1.0)
+    scale = wp.vec3(2.0, 3.0, 4.0)
+    wp.expect_eq(wp.matrix(pos, rot, scale, wp.float32), expected_matrix)
+    wp.expect_eq(wp.matrix(pos=pos, rot=rot, scale=scale, dtype=wp.float32), expected_matrix)
+    wp.expect_eq(wp.matrix(pos, rot, scale, dtype=wp.float32), expected_matrix)
+    wp.expect_eq(wp.matrix(rot=rot, pos=pos, dtype=wp.float32, scale=scale), expected_matrix)
+
+
 class TestCodeGen(unittest.TestCase):
     pass
 
@@ -555,8 +637,16 @@ add_kernel_test(TestCodeGen, name="test_continue_unroll", kernel=test_continue_u
 add_function_test(TestCodeGen, func=test_unresolved_func, name="test_unresolved_func", devices=devices)
 add_function_test(TestCodeGen, func=test_unresolved_symbol, name="test_unresolved_symbol", devices=devices)
 add_function_test(TestCodeGen, func=test_error_global_var, name="test_error_global_var", devices=devices)
+add_function_test(
+    TestCodeGen, func=test_error_collection_construct, name="test_error_collection_construct", devices=devices
+)
+add_function_test(
+    TestCodeGen, func=test_error_unmatched_arguments, name="test_error_unmatched_arguments", devices=devices
+)
+
+add_kernel_test(TestCodeGen, name="test_call_syntax", kernel=test_call_syntax, dim=1, devices=devices)
 
 
 if __name__ == "__main__":
-    wp.build.clear_kernel_cache()
+    wp.clear_kernel_cache()
     unittest.main(verbosity=2, failfast=True)

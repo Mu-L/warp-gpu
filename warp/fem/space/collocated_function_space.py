@@ -36,7 +36,7 @@ class CollocatedFunctionSpace(FunctionSpace):
         self.element_outer_weight_gradient = self._basis.make_element_outer_weight_gradient()
 
         # For backward compatibility
-        if hasattr(basis.topology, "node_grid"):
+        if hasattr(basis, "node_grid"):
             self.node_grid = basis.node_grid
         if hasattr(basis, "node_triangulation"):
             self.node_triangulation = basis.node_triangulation
@@ -44,6 +44,8 @@ class CollocatedFunctionSpace(FunctionSpace):
             self.node_tets = basis.node_tets
         if hasattr(basis, "node_hexes"):
             self.node_hexes = basis.node_hexes
+        if hasattr(basis, "vtk_cells"):
+            self.vtk_cells = basis.vtk_cells
 
     def space_arg_value(self, device):
         return self._basis.basis_arg_value(device)

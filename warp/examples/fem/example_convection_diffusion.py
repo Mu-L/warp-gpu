@@ -15,18 +15,8 @@
 ###########################################################################
 
 import warp as wp
+import warp.examples.fem.utils as fem_example_utils
 import warp.fem as fem
-
-# Import example utilities
-# Make sure that works both when imported as module and run as standalone file
-try:
-    from .bsr_utils import bsr_cg
-    from .mesh_utils import gen_trimesh
-    from .plot_utils import Plot
-except ImportError:
-    from bsr_utils import bsr_cg
-    from mesh_utils import gen_trimesh
-    from plot_utils import Plot
 
 
 @fem.integrand
@@ -94,8 +84,8 @@ class Example:
         self.current_frame = 0
 
         if tri_mesh:
-            positions, tri_vidx = gen_trimesh(res=wp.vec2i(res))
-            geo = fem.Trimesh2D(tri_vertex_indices=tri_vidx, positions=positions)
+            positions, tri_vidx = fem_example_utils.gen_trimesh(res=wp.vec2i(res))
+            geo = fem.Trimesh2D(tri_vertex_indices=tri_vidx, positions=positions, build_bvh=True)
         else:
             geo = fem.Grid2D(res=wp.vec2i(res))
 
@@ -116,8 +106,8 @@ class Example:
             output_dtype=float,
         )
 
-        self.renderer = Plot()
-        self.renderer.add_surface("phi", self._phi_field)
+        self.renderer = fem_example_utils.Plot()
+        self.renderer.add_field("phi", self._phi_field)
 
     def step(self):
         self.current_frame += 1
@@ -131,11 +121,11 @@ class Example:
         )
 
         # Solve linear system
-        bsr_cg(self._matrix, x=self._phi_field.dof_values, b=rhs, quiet=self._quiet, tol=1.0e-12)
+        fem_example_utils.bsr_cg(self._matrix, x=self._phi_field.dof_values, b=rhs, quiet=self._quiet, tol=1.0e-12)
 
     def render(self):
         self.renderer.begin_frame(time=self.current_frame * self.sim_dt)
-        self.renderer.add_surface("phi", self._phi_field)
+        self.renderer.add_field("phi", self._phi_field)
         self.renderer.end_frame()
 
 

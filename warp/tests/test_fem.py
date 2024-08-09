@@ -18,7 +18,14 @@ from warp.fem.geometry import DeformedGeometry
 from warp.fem.geometry.closest_point import project_on_tet_at_origin, project_on_tri_at_origin
 from warp.fem.space import shape
 from warp.fem.types import make_free_sample
-from warp.fem.utils import grid_to_hexes, grid_to_quads, grid_to_tets, grid_to_tris
+from warp.fem.utils import (
+    grid_to_hexes,
+    grid_to_quads,
+    grid_to_tets,
+    grid_to_tris,
+    inverse_qr,
+    symmetric_eigenvalues_qr,
+)
 from warp.tests.unittest_utils import *
 
 
@@ -872,7 +879,7 @@ def test_shape_function_weight(test, shape: shape.ShapeFunction, coord_sampler, 
     def node_unity_test():
         n = wp.tid()
         node_w = weight_fn(node_coords_fn(n), n)
-        wp.expect_near(node_w, 1.0, places=5)
+        wp.expect_near(node_w, 1.0, 1e-5)
 
     wp.launch(node_unity_test, dim=NODE_COUNT, inputs=[])
 
@@ -1201,6 +1208,34 @@ def test_point_basis(test, device):
 
     test.assertAlmostEqual(np.sum(zeros.numpy()), 0.0, places=5)
 
+    # test point basis with variable points per cell
+    points = wp.array([[0.25, 0.33], [0.33, 0.25], [0.8, 0.8]], dtype=wp.vec2)
+    pic = fem.PicQuadrature(domain, positions=points)
+
+    test.assertEqual(pic.active_cell_count(), 2)
+    test.assertEqual(pic.total_point_count(), 3)
+    test.assertEqual(pic.max_points_per_element(), 2)
+
+    point_basis = fem.PointBasisSpace(pic)
+    point_space = fem.make_collocated_function_space(point_basis)
+    point_test = fem.make_test(point_space, domain=domain)
+    test.assertEqual(point_test.space_restriction.node_count(), 3)
+
+    ones = fem.integrate(linear_form, fields={"u": point_test}, quadrature=pic)
+    test.assertAlmostEqual(np.sum(ones.numpy()), pic.active_cell_count() / geo.cell_count(), places=5)
+
+    zeros = fem.integrate(linear_form, quadrature=other_quadrature, fields={"u": point_test})
+    test.assertAlmostEqual(np.sum(zeros.numpy()), 0.0, places=5)
+
+    linear_vec = fem.make_polynomial_space(geo, dtype=wp.vec2)
+    linear_test = fem.make_test(linear_vec)
+    point_trial = fem.make_trial(point_space)
+
+    mat = fem.integrate(vector_divergence_form, fields={"u": linear_test, "q": point_trial}, quadrature=pic)
+    test.assertEqual(mat.nrow, 9)
+    test.assertEqual(mat.ncol, 3)
+    test.assertEqual(mat.nnz_sync(), 12)
+
 
 @fem.integrand
 def _bicubic(s: Sample, domain: Domain):
@@ -1228,7 +1263,7 @@ def test_particle_quadratures(test, device):
 
     explicit_quadrature = fem.ExplicitQuadrature(domain, points, weights)
 
-    test.assertEqual(explicit_quadrature.points_per_element(), points_per_cell)
+    test.assertEqual(explicit_quadrature.max_points_per_element(), points_per_cell)
     test.assertEqual(explicit_quadrature.total_point_count(), points_per_cell * geo.cell_count())
 
     val = fem.integrate(_bicubic, quadrature=explicit_quadrature)
@@ -1247,12 +1282,181 @@ def test_particle_quadratures(test, device):
 
     pic_quadrature = fem.PicQuadrature(domain, positions=(element_indices, element_coords))
 
-    test.assertIsNone(pic_quadrature.points_per_element())
+    test.assertEqual(pic_quadrature.max_points_per_element(), 2)
     test.assertEqual(pic_quadrature.total_point_count(), 3)
     test.assertEqual(pic_quadrature.active_cell_count(), 2)
 
     val = fem.integrate(_piecewise_constant, quadrature=pic_quadrature)
     test.assertAlmostEqual(val, 1.25, places=5)
+
+    # Test differentiability of PicQuadrature w.r.t positions and measures
+    points = wp.array([[0.25, 0.33], [0.33, 0.25], [0.8, 0.8]], dtype=wp.vec2, device=device, requires_grad=True)
+    measures = wp.ones(3, dtype=float, device=device, requires_grad=True)
+
+    tape = wp.Tape()
+    with tape:
+        pic = fem.PicQuadrature(domain, positions=points, measures=measures, requires_grad=True)
+
+    pic.arg_value(device).particle_coords.grad.fill_(1.0)
+    pic.arg_value(device).particle_fraction.grad.fill_(1.0)
+    tape.backward()
+
+    assert_np_equal(points.grad.numpy(), np.full((3, 2), 2.0))  # == 1.0 / cell_size
+    assert_np_equal(measures.grad.numpy(), np.full(3, 4.0))  # == 1.0 / cell_area
+
+
+@wp.func
+def aniso_bicubic_fn(x: wp.vec2, scale: wp.vec2):
+    return wp.pow(x[0] * scale[0], 3.0) * wp.pow(x[1] * scale[1], 3.0)
+
+
+@wp.func
+def aniso_bicubic_grad(x: wp.vec2, scale: wp.vec2):
+    return wp.vec2(
+        3.0 * scale[0] * wp.pow(x[0] * scale[0], 2.0) * wp.pow(x[1] * scale[1], 3.0),
+        3.0 * scale[1] * wp.pow(x[0] * scale[0], 3.0) * wp.pow(x[1] * scale[1], 2.0),
+    )
+
+
+def test_implicit_fields(test, device):
+    geo = fem.Grid2D(res=wp.vec2i(2))
+    domain = fem.Cells(geo)
+    boundary = fem.BoundarySides(geo)
+
+    space = fem.make_polynomial_space(geo)
+    vec_space = fem.make_polynomial_space(geo, dtype=wp.vec2)
+    discrete_field = fem.make_discrete_field(space)
+    discrete_vec_field = fem.make_discrete_field(vec_space)
+
+    # Uniform
+
+    uniform = fem.UniformField(domain, 5.0)
+    fem.interpolate(uniform, dest=discrete_field)
+    assert_np_equal(discrete_field.dof_values.numpy(), np.full(9, 5.0))
+
+    fem.interpolate(grad_field, fields={"p": uniform}, dest=discrete_vec_field)
+    assert_np_equal(discrete_vec_field.dof_values.numpy(), np.zeros((9, 2)))
+
+    uniform.value = 2.0
+    fem.interpolate(uniform.trace(), dest=fem.make_restriction(discrete_field, domain=boundary))
+    assert_np_equal(discrete_field.dof_values.numpy(), np.array([2.0] * 4 + [5.0] + [2.0] * 4))
+
+    # Implicit
+
+    implicit = fem.ImplicitField(
+        domain, func=aniso_bicubic_fn, values={"scale": wp.vec2(2.0, 4.0)}, grad_func=aniso_bicubic_grad
+    )
+    fem.interpolate(implicit, dest=discrete_field)
+    assert_np_equal(
+        discrete_field.dof_values.numpy(),
+        np.array([0.0, 0.0, 0.0, 0.0, 2.0**3, 4.0**3, 0.0, 2.0**3 * 2.0**3, 4.0**3 * 2.0**3]),
+    )
+
+    fem.interpolate(grad_field, fields={"p": implicit}, dest=discrete_vec_field)
+    assert_np_equal(discrete_vec_field.dof_values.numpy()[0], np.zeros(2))
+    assert_np_equal(discrete_vec_field.dof_values.numpy()[-1], np.full(2, (2.0**9.0 * 3.0)))
+
+    implicit.values.scale = wp.vec2(-2.0, -2.0)
+    fem.interpolate(implicit.trace(), dest=fem.make_restriction(discrete_field, domain=boundary))
+    assert_np_equal(
+        discrete_field.dof_values.numpy(),
+        np.array([0.0, 0.0, 0.0, 0.0, 2.0**3, 2.0**3, 0.0, 2.0**3, 4.0**3]),
+    )
+
+    # Nonconforming
+
+    geo2 = fem.Grid2D(res=wp.vec2i(1), bounds_lo=wp.vec2(0.25, 0.25), bounds_hi=wp.vec2(2.0, 2.0))
+    domain2 = fem.Cells(geo2)
+    boundary2 = fem.BoundarySides(geo2)
+    space2 = fem.make_polynomial_space(geo2)
+    vec_space2 = fem.make_polynomial_space(geo2, dtype=wp.vec2)
+    discrete_field2 = fem.make_discrete_field(space2)
+    discrete_vec_field2 = fem.make_discrete_field(vec_space2)
+
+    nonconforming = fem.NonconformingField(domain2, discrete_field, background=5.0)
+    fem.interpolate(
+        nonconforming,
+        dest=discrete_field2,
+    )
+    assert_np_equal(discrete_field2.dof_values.numpy(), np.array([2.0] + [5.0] * 3))
+
+    fem.interpolate(grad_field, fields={"p": nonconforming}, dest=discrete_vec_field2)
+    assert_np_equal(discrete_vec_field2.dof_values.numpy()[0], np.full(2, 8.0))
+    assert_np_equal(discrete_vec_field2.dof_values.numpy()[-1], np.zeros(2))
+
+    discrete_field2.dof_values.zero_()
+    fem.interpolate(
+        nonconforming.trace(),
+        dest=fem.make_restriction(discrete_field2, domain=boundary2),
+    )
+    assert_np_equal(discrete_field2.dof_values.numpy(), np.array([2.0] + [5.0] * 3))
+
+
+@wp.kernel
+def test_qr_eigenvalues():
+    tol = 1.0e-6
+
+    # zero
+    Zero = wp.mat33(0.0)
+    Id = wp.identity(n=3, dtype=float)
+    D3, P3 = symmetric_eigenvalues_qr(Zero, tol * tol)
+    wp.expect_eq(D3, wp.vec3(0.0))
+    wp.expect_eq(P3, Id)
+
+    # Identity
+    D3, P3 = symmetric_eigenvalues_qr(Id, tol * tol)
+    wp.expect_eq(D3, wp.vec3(1.0))
+    wp.expect_eq(wp.transpose(P3) * P3, Id)
+
+    # rank 1
+    v = wp.vec4(0.0, 1.0, 1.0, 0.0)
+    Rank1 = wp.outer(v, v)
+    D4, P4 = symmetric_eigenvalues_qr(Rank1, tol * tol)
+    wp.expect_near(wp.max(D4), wp.length_sq(v), tol)
+    Err4 = wp.transpose(P4) * wp.diag(D4) * P4 - Rank1
+    wp.expect_near(wp.ddot(Err4, Err4), 0.0, tol)
+
+    # rank 2
+    v2 = wp.vec4(0.0, 0.5, -0.5, 0.0)
+    Rank2 = Rank1 + wp.outer(v2, v2)
+    D4, P4 = symmetric_eigenvalues_qr(Rank2, tol * tol)
+    wp.expect_near(wp.max(D4), wp.length_sq(v), tol)
+    wp.expect_near(D4[0] + D4[1] + D4[2] + D4[3], wp.length_sq(v) + wp.length_sq(v2), tol)
+    Err4 = wp.transpose(P4) * wp.diag(D4) * P4 - Rank2
+    wp.expect_near(wp.ddot(Err4, Err4), 0.0, tol)
+
+    # rank 4
+    v3 = wp.vec4(1.0, 2.0, 3.0, 4.0)
+    v4 = wp.vec4(2.0, 1.0, 0.0, -1.0)
+    Rank4 = Rank2 + wp.outer(v3, v3) + wp.outer(v4, v4)
+    D4, P4 = symmetric_eigenvalues_qr(Rank4, tol * tol)
+    Err4 = wp.transpose(P4) * wp.diag(D4) * P4 - Rank4
+    wp.expect_near(wp.ddot(Err4, Err4), 0.0, tol)
+
+
+@wp.kernel
+def test_qr_inverse():
+    rng = wp.rand_init(4356, wp.tid())
+    M = wp.mat33(
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+        wp.randf(rng, 0.0, 10.0),
+    )
+
+    if wp.determinant(M) != 0.0:
+        tol = 1.0e-8
+        Mi = inverse_qr(M)
+        Id = wp.identity(n=3, dtype=float)
+        Err = M * Mi - Id
+        wp.expect_near(wp.ddot(Err, Err), 0.0, tol)
+        Err = Mi * M - Id
+        wp.expect_near(wp.ddot(Err, Err), 0.0, tol)
 
 
 devices = get_test_devices()
@@ -1281,6 +1485,9 @@ add_function_test(TestFem, "test_deformed_geometry", test_deformed_geometry, dev
 add_function_test(TestFem, "test_dof_mapper", test_dof_mapper)
 add_function_test(TestFem, "test_point_basis", test_point_basis)
 add_function_test(TestFem, "test_particle_quadratures", test_particle_quadratures)
+add_function_test(TestFem, "test_implicit_fields", test_implicit_fields)
+add_kernel_test(TestFem, test_qr_eigenvalues, dim=1, devices=devices)
+add_kernel_test(TestFem, test_qr_inverse, dim=100, devices=devices)
 
 
 class TestFemShapeFunctions(unittest.TestCase):
@@ -1294,5 +1501,5 @@ add_function_test(TestFemShapeFunctions, "test_tet_shape_functions", test_tet_sh
 
 
 if __name__ == "__main__":
-    wp.build.clear_kernel_cache()
-    unittest.main(verbosity=2)
+    wp.clear_kernel_cache()
+    unittest.main(verbosity=2, failfast=True)

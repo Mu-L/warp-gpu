@@ -19,19 +19,10 @@ import math
 import numpy as np
 
 import warp as wp
+import warp.examples.fem.utils as fem_example_utils
 import warp.fem as fem
 from warp.fem.utils import array_axpy
-from warp.sparse import bsr_axpy, bsr_mm, bsr_mv, bsr_transposed
 from warp.utils import array_cast
-
-# Import example utilities
-# Make sure that works both when imported as module and run as standalone file
-try:
-    from .bsr_utils import bsr_cg
-    from .plot_utils import Plot
-except ImportError:
-    from bsr_utils import bsr_cg
-    from plot_utils import Plot
 
 
 @fem.integrand
@@ -141,7 +132,7 @@ class Example:
         self._pic_quadrature = fem.PicQuadrature(domain, particles, particle_areas)
         self._particle_velocities = particle_velocities
 
-        self.renderer = Plot()
+        self.renderer = fem_example_utils.Plot()
 
     def step(self):
         u_space = self._u_field.space
@@ -182,21 +173,21 @@ class Example:
 
         # Assemble linear system
         u_matrix = u_visc_matrix
-        bsr_axpy(u_bd_matrix, u_matrix, alpha=self.bd_strength)
+        u_matrix += u_bd_matrix * self.bd_strength
 
-        div_matrix_t = bsr_transposed(div_matrix)
-        gradient_matrix = bsr_mm(div_matrix_t, inv_p_mass_matrix)
-        bsr_mm(gradient_matrix, div_matrix, u_matrix, alpha=1.0 / self.compliance, beta=1.0)
+        gradient_matrix = div_matrix.transpose() @ inv_p_mass_matrix
+        u_matrix += gradient_matrix @ div_matrix / self.compliance
 
+        # scale u_rhs
         array_axpy(u_rhs, u_rhs, alpha=0.0, beta=self.bd_strength)
 
         # Solve for displacement
         u_res = wp.zeros_like(u_rhs)
-        bsr_cg(u_matrix, x=u_res, b=u_rhs, quiet=self._quiet)
+        fem_example_utils.bsr_cg(u_matrix, x=u_res, b=u_rhs, quiet=self._quiet)
 
         # Compute pressure from displacement
-        div_u = bsr_mv(A=div_matrix, x=u_res)
-        p_res = bsr_mv(A=inv_p_mass_matrix, x=div_u, alpha=-1)
+        div_u = div_matrix @ u_res
+        p_res = -inv_p_mass_matrix @ div_u
 
         # Copy to fields
         u_nodes = wp.indexedarray(self._u_field.dof_values, indices=self._active_space_partition.space_node_indices())
@@ -206,8 +197,8 @@ class Example:
         array_cast(in_array=p_res, out_array=p_nodes)
 
     def render(self):
-        self.renderer.add_surface("pressure", self._p_field)
-        self.renderer.add_surface_vector("velocity", self._u_field)
+        self.renderer.add_field("pressure", self._p_field)
+        self.renderer.add_field("velocity", self._u_field)
 
     def _gen_particles(self, circle_radius, c1_center, c2_center):
         """Generate some particles along two circles defining velocity boundary conditions"""
@@ -260,4 +251,4 @@ if __name__ == "__main__":
         example.render()
 
         if not args.headless:
-            example.renderer.plot(streamlines=["velocity"])
+            example.renderer.plot(options={"velocity": {"streamlines": {}}})

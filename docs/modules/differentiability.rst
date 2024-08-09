@@ -32,20 +32,92 @@ Note that gradients are accumulated on the participating buffers, so if you wish
 
     tape.zero()
 
-.. note::
-
-    Warp uses a source-code transformation approach to auto-differentiation.
-    In this approach, the backwards pass must keep a record of intermediate values computed during the forward pass.
-    This imposes some restrictions on what kernels can do and still be differentiable:
-
-    * Dynamic loops should not mutate any previously declared local variable. This means the loop must be side-effect free.
-      A simple way to ensure this is to move the loop body into a separate function.
-      Static loops that are unrolled at compile time do not have this restriction and can perform any computation.
-
-    * Kernels should not overwrite any previously used array values except to perform simple linear add/subtract operations (e.g. via :func:`wp.atomic_add() <atomic_add>`)
-
 .. autoclass:: Tape
     :members:
+
+Copying is Differentiable
+#########################
+
+``wp.copy()``, ``wp.clone()``, and ``array.assign()`` are differentiable functions and can participate in the computation graph recorded on the tape. Consider the following examples and their
+PyTorch equivalents (for comparison):
+
+``wp.copy()``::
+
+    @wp.kernel
+    def double(x: wp.array(dtype=float), y: wp.array(dtype=float)):
+        tid = wp.tid()
+        y[tid] = x[tid] * 2.0
+
+    x = wp.array(np.arange(3), dtype=float, requires_grad=True)
+    y = wp.zeros_like(x)
+    z = wp.zeros_like(x)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(double, dim=3, inputs=[x, y])
+        wp.copy(z, y)
+
+    tape.backward(grads={z: wp.ones_like(x)})
+
+    print(x.grad)
+    # [2. 2. 2.]
+
+Equivalently, in PyTorch::
+
+    x = torch.tensor(np.arange(3), dtype=torch.float32, requires_grad=True)
+    y = x * 2
+    z = torch.zeros_like(y).copy_(y)
+
+    z.sum().backward()
+
+    print(x.grad)
+    # tensor([2., 2., 2.])
+
+``wp.clone()``::
+
+    x = wp.array(np.arange(3), dtype=float, requires_grad=True)
+    y = wp.zeros_like(x)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(double, dim=3, inputs=[x, y])
+        z = wp.clone(y, requires_grad=True)
+
+    tape.backward(grads={z: wp.ones_like(x)})
+
+    print(x.grad)
+    # [2. 2. 2.]
+
+In PyTorch::
+    
+    x = torch.tensor(np.arange(3), dtype=torch.float32, requires_grad=True)
+    y = x * 2
+    z = torch.clone(y)
+
+    z.sum().backward()
+    print(x.grad)
+    # tensor([2., 2., 2.])
+
+.. note:: In PyTorch, one may clone a tensor x and detach it from the current computation graph by calling
+    ``x.clone().detach()``. The equivalent in Warp is ``wp.clone(x, requires_grad=False)``.
+
+``array.assign()``::
+
+    x = wp.array(np.arange(3), dtype=float, requires_grad=True)
+    y = wp.zeros_like(x)
+    z = wp.zeros_like(y)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(double, dim=3, inputs=[x], outputs=[y])
+        z.assign(y)
+
+    tape.backward(grads={z: wp.ones_like(x)})
+
+    print(x.grad)
+    # [2. 2. 2.]
+
+.. note:: ``array.assign()`` is equivalent to ``wp.copy()`` with an additional step that wraps the source array in a Warp array if it is not already a Warp array.
 
 Jacobians
 #########
@@ -488,13 +560,158 @@ Debugging Gradients
 ###################
 
 .. note::
-    We are expanding the debugging section to provide tools to help users debug gradient computations in the next Warp release.
+    We are continuously expanding the debugging section to provide tools to help users debug gradient computations in upcoming Warp releases.
+
+Measuring Gradient Accuracy
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. currentmodule:: warp.autograd
+    
+Warp provides utility functions to evaluate the partial Jacobian matrices for input/output argument pairs given to kernel launches.
+:func:`jacobian` computes the Jacobian matrix of a kernel using Warp's automatic differentiation engine.
+:func:`jacobian_fd` computes the Jacobian matrix of a kernel using finite differences.
+:func:`gradcheck` compares the Jacobian matrices computed by the autodiff engine and finite differences to measure the accuracy of the gradients.
+:func:`jacobian_plot` visualizes the Jacobian matrices returned by the :func:`jacobian` and :func:`jacobian_fd` functions.
+
+.. autofunction:: gradcheck
+
+.. autofunction:: gradcheck_tape
+
+.. autofunction:: jacobian
+
+.. autofunction:: jacobian_fd
+
+.. autofunction:: jacobian_plot
+
+
+Example usage
+"""""""""""""
+
+.. code-block:: python
+
+    import warp as wp
+    import warp.autograd
+
+    @wp.kernel
+    def my_kernel(
+        a: wp.array(dtype=float), b: wp.array(dtype=wp.vec3),
+        out1: wp.array(dtype=wp.vec2), out2: wp.array(dtype=wp.quat),
+    ):
+        tid = wp.tid()
+        ai, bi = a[tid], b[tid]
+        out1[tid] = wp.vec2(ai * wp.length(bi), -ai * wp.dot(bi, wp.vec3(0.1, 1.0, -0.1)))
+        out2[tid] = wp.normalize(wp.quat(ai, bi[0], bi[1], bi[2]))
+
+    a = wp.array([2.0, -1.0], dtype=wp.float32, requires_grad=True)
+    b = wp.array([wp.vec3(3.0, 1.0, 2.0), wp.vec3(-4.0, -1.0, 0.0)], dtype=wp.vec3, requires_grad=True)
+    out1 = wp.zeros(2, dtype=wp.vec2, requires_grad=True)
+    out2 = wp.zeros(2, dtype=wp.quat, requires_grad=True)
+
+    # compute the Jacobian matrices for all input/output pairs of the kernel using the autodiff engine
+    jacs = wp.autograd.jacobian(
+        my_kernel, dim=len(a), inputs=[a, b], outputs=[out1, out2],
+        plot_jacobians=True)
+
+.. image:: ../img/kernel_jacobian_ad.svg
+
+The ``jacs`` dictionary contains the Jacobian matrices as Warp arrays for all input/output pairs of the kernel.
+The ``plot_jacobians`` argument visualizes the Jacobian matrices using the :func:`jacobian_plot` function.
+The subplots show the Jacobian matrices for each input (column) and output (row) pair.
+The major (thick) gridlines in these image plots separate the array elements of the respective Warp arrays. Since the kernel arguments ``b``, ``out1``, and ``out2`` are Warp arrays with vector-type elements,
+the minor (thin, dashed) gridlines for the corresponding subplots indicate the vector elements.
+
+
+Checking the gradient accuracy using the :func:`gradcheck` function:
+
+.. code-block:: python
+
+    passed = wp.autograd.gradcheck(
+        my_kernel, dim=len(a), inputs=[a, b], outputs=[out1, out2],
+        plot_relative_error=False, plot_absolute_error=False,
+        raise_exception=False, show_summary=True)
+
+    assert passed
+
+Output:
+   
+   .. list-table:: 
+      :header-rows: 1
+   
+      * - Input
+        - Output
+        - Max Abs Error
+        - Max Rel Error
+        - Pass
+      * - a
+        - out1
+        - 1.5134811e-03
+        - 4.0449476e-04
+        - .. raw:: html
+   
+            <span style="color: green;">PASS</span>
+      * - a
+        - out2
+        - 1.1073798e-04
+        - 1.4098687e-03
+        - .. raw:: html
+   
+            <span style="color: green;">PASS</span>
+      * - b
+        - out1
+        - 9.8955631e-04
+        - 4.6023726e-03
+        - .. raw:: html
+   
+            <span style="color: green;">PASS</span>
+      * - b
+        - out2
+        - 3.3494830e-04
+        - 1.2789593e-02
+        - .. raw:: html
+   
+            <span style="color: green;">PASS</span>
+   
+   .. raw:: html
+   
+       <span style="color: green;">Gradient check for kernel my_kernel passed</span>
+
+
+Instead of evaluating Jacobians for all inputs and outputs of a kernel, we can also limit the computation to a specific subset of input/output pairs::
+
+    jacs = wp.autograd.jacobian(
+        my_kernel, dim=len(a), inputs=[a, b], outputs=[out1, out2],
+        plot_jacobians=True,
+        # select which input/output pairs to compute the Jacobian for
+        input_output_mask=[("a", "out1"), ("b", "out2")],
+        # limit the number of dimensions to query per output array
+        max_outputs_per_var=5,
+    )
+
+.. image:: ../img/kernel_jacobian_ad_subset.svg
+
+The returned Jacobian matrices are now limited to the input/output pairs specified in the ``input_output_mask`` argument.
+Furthermore, we limited the number of dimensions to evaluate the gradient for to 5 per output array using the ``max_outputs_per_var`` argument.
+The corresponding non-evaluated Jacobian elements are set to ``NaN``.
+
+Furthermore, it is possible to check the gradients of multiple kernels recorded on a :class:`Tape` via the :func:`gradcheck_tape` function. Here, the inputs and outputs of the kernel launches are used to compute the Jacobian matrices for each kernel launch and compare them with finite differences::
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(my_kernel_1, dim=len(a), inputs=[a, b], outputs=[out1, c])
+        wp.launch(my_kernel_2, dim=len(c), inputs=[c], outputs=[out2])
+
+    passed = wp.autograd.gradcheck_tape(tape, raise_exception=False, show_summary=True)
+
+    assert passed
+
 
 Visualizing Computation Graphs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. currentmodule:: warp
+
 Computing gradients via automatic differentiation can be error-prone, where arrays sometimes miss the ``requires_grad`` setting, or the wrong arrays are passed between kernels. To help debug gradient computations, Warp provides a
-``tape.visualize()`` method that generates a graph visualization of the kernel launches recorded on the tape in the `GraphViz <https://graphviz.org/>`_ dot format.
+:meth:`Tape.visualize` method that generates a graph visualization of the kernel launches recorded on the tape in the `GraphViz <https://graphviz.org/>`_ dot format.
 The visualization shows how the Warp arrays are used as inputs and outputs of the kernel launches.
 
 Example usage::
@@ -554,3 +771,294 @@ In the example above we can see that the array ``c`` does not have its ``require
 
 .. note::
     Arrays can be labeled with custom names using the ``array_labels`` argument to the ``tape.visualize()`` method.
+
+Array Overwrite Tracking
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+It is a common mistake to inadvertently overwrite an array that participates in the computation graph. For example::
+
+    with tape as wp.Tape():
+
+        # step 1
+        wp.launch(compute_forces, dim=n, inputs=[pos0, vel0], outputs=[force])
+        wp.launch(simulate, dim=n, inputs=[pos0, vel0, force], outputs=[pos1, vel1])
+
+        # step 2 (error, we are overwriting previous forces)
+        wp.launch(compute_forces, dim=n, inputs=[pos1, vel1],  outputs=[force]) 
+        wp.launch(simulate, dim=n, inputs=[pos1, vel1, force], outputs=[pos2, vel2])
+
+        # compute loss
+        wp.launch(loss, dim=n, inputs=[pos2])
+
+    tape.backward(loss)
+
+Running the tape backwards will incorrectly compute the gradient of the loss with respect to ``pos0`` and ``vel0``, because ``force`` is overwritten in the second simulation step.
+The adjoint of ``force`` with respect to ``pos1`` and ``vel1`` will be correct, because the stored value of ``force`` from the forward pass is still correct, but the adjoint of
+``force`` with respect to ``pos0`` and ``vel0`` will be incorrect, because the ``force`` value used in this calculation was calculated in step 2, not step 1. The solution is to allocate
+two force arrays, ``force0`` and ``force1``, so that we are not overwriting data that participates in the computation graph.
+
+This sort of problem boils down to a single pattern to be avoided: writing to an array after reading from it. This typically happens over consecutive kernel launches (A), but it might also happen within a single kernel (B).
+
+A: Inter-Kernel Overwrite::
+
+    import warp as wp
+
+    @wp.kernel
+    def square_kernel(x: wp.array(dtype=float), y: wp.array(dtype=float)):
+        tid = wp.tid()
+        y[tid] = x[tid] * x[tid]
+
+    @wp.kernel
+    def overwrite_kernel(z: wp.array(dtype=float), x: wp.array(dtype=float)):
+        tid = wp.tid()
+        x[tid] = z[tid]
+
+    @wp.kernel
+    def loss_kernel(x: wp.array(dtype=float), loss: wp.array(dtype=float)):
+        tid = wp.tid()
+        wp.atomic_add(loss, 0, x[tid])
+
+    a = wp.array(np.array([1.0, 2.0, 3.0]), dtype=float, requires_grad=True)
+    b = wp.zeros_like(a)
+    c = wp.array(np.array([-1.0, -2.0, -3.0]), dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(square_kernel, a.shape, inputs=[a], outputs=[b])
+        wp.launch(overwrite_kernel, c.shape, inputs=[c], outputs=[a])
+        wp.launch(loss_kernel, a.shape, inputs=[a, loss])
+
+    tape.backward(loss)
+
+    print(a.grad)
+    # prints [-2. -4. -6.] instead of [2. 4. 6.]
+
+B: Intra-Kernel Overwrite::
+
+    import warp as wp
+
+    @wp.kernel
+    def readwrite_kernel(a: wp.array(dtype=float), b: wp.array(dtype=float)):
+        tid = wp.tid()
+        b[tid] = a[tid] * a[tid]
+        a[tid] = 1.0
+
+    @wp.kernel
+    def loss_kernel(x: wp.array(dtype=float), loss: wp.array(dtype=float)):
+        tid = wp.tid()
+        wp.atomic_add(loss, 0, x[tid])
+
+    a = wp.array(np.array([1.0, 2.0, 3.0]), dtype=float, requires_grad=True)
+    b = wp.zeros_like(a)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    tape = wp.Tape()
+    with tape:
+        wp.launch(readwrite_kernel, dim=a.shape, inputs=[a, b])
+        wp.launch(loss_kernel, a.shape, inputs=[b, loss])
+
+    tape.backward(loss)
+
+    print(a.grad)
+    # prints [2. 2. 2.] instead of [2. 4. 6.]
+
+If ``wp.config.verify_autograd_array_access = True`` is set, Warp will automatically detect and report array overwrites, covering the above two cases as well as other problematic configurations.
+It does so by flagging which kernel array arguments are read from and/or written to in each kernel function during compilation. At runtime, if an array is passed to a kernel argument marked with a read flag,
+it is marked as having been read from. Later, if the same array is passed to a kernel argument marked with a write flag, a warning is printed
+(recall the pattern we wish to avoid: *write* after *read*).
+
+.. note::
+    Setting ``wp.config.verify_autograd_array_access = True`` will disable kernel caching and force the current module to rebuild.
+
+.. note::
+    Though in-place operations such as ``x[tid] += 1.0`` are technically ``read -> write``, the Warp graph specifically accomodates adjoint accumulation in these cases, so we mark them as write operations.
+
+.. note::
+    This feature does not yet support arrays packed in Warp structs.
+
+If you make use of :py:meth:`Tape.record_func` in your graph (and so provide your own adjoint callback), be sure to also call :py:meth:`array.mark_write()` and :py:meth:`array.mark_read()`, which will manually mark your arrays as having been written to or read from.
+
+.. _limitations_and_workarounds:
+
+Limitations and Workarounds
+###########################
+
+Warp uses a source-code transformation approach to auto-differentiation.
+In this approach, the backwards pass must keep a record of intermediate values computed during the forward pass.
+This imposes some restrictions on what kernels can do if they are to remain differentiable.
+
+Dynamic Loops
+^^^^^^^^^^^^^
+Currently, dynamic loops are not replayed or unrolled in the backward pass, meaning intermediate values that are
+meant to be computed in the loop and may be necessary for adjoint calculations are not updated.
+
+In the following example, the correct gradient is computed because the ``x`` array adjoints do not depend on intermediate values of ``sum``::
+
+    @wp.kernel
+    def dynamic_loop_sum(x: wp.array(dtype=float),
+                    loss: wp.array(dtype=float),
+                    iters: int):
+
+        sum = float(0.0)
+
+        for i in range(iters):
+            sum += x[i]
+
+        wp.atomic_add(loss, 0, sum)
+
+    iters = 3
+    x = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_sum, dim=1, inputs=[x, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+    # [1. 1. 1.] (correct)
+
+In contrast, in this example, the ``x`` array adjoints do depend on intermediate values of ``prod``
+(``adj_x[i] = adj_prod[i+1] * prod[i]``) so the gradients are not correctly computed::
+
+    @wp.kernel
+    def dynamic_loop_mult(x: wp.array(dtype=float),
+                    loss: wp.array(dtype=float),
+                    iters: int):
+
+        prod = float(1.0)
+
+        for i in range(iters):
+            prod *= x[i]
+
+        wp.atomic_add(loss, 0, prod)
+
+    iters = 3
+    x = wp.full(shape=iters, value=2.0, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_mult, dim=1, inputs=[x, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+    # [32. 8. 2.] (incorrect)
+
+We can fix the latter case by switching to a static loop (e.g. replacing ``range(iters)`` with ``range(3)``). Static loops are
+automatically unrolled if the number of loop iterations is less than or equal to the ``max_unroll`` parameter set in ``wp.config`` 
+or at the module level with ``wp.set_module_options({"max_unroll": N})``, and so intermediate values in the loop are individually stored.
+But in scenarios where this is not possible, you may consider allocating additional memory to store intermediate values in the dynamic loop.
+For example, we can fix the above case like so::
+
+    @wp.kernel
+    def dynamic_loop_mult(x: wp.array(dtype=float),
+                    prods: wp.array(dtype=float),
+                    loss: wp.array(dtype=float),
+                    iters: int):
+
+        for i in range(iters):
+            prods[i+1] = x[i] * prods[i]
+
+        wp.atomic_add(loss, 0, prods[iters])
+
+    iters = 3
+    x = wp.full(shape=iters, value=2.0, dtype=float, requires_grad=True)
+    prods = wp.full(shape=(iters + 1), value=1.0, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_mult, dim=1, inputs=[x, prods, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+    # [4. 4. 4] (correct)
+
+Even if an array's adjoints do not depend on `intermediate` local values in a dynamic loop, it may be that
+the `final` value of a local variable is necessary for the adjoint computation. Consider the following scenario::
+
+    @wp.kernel
+    def dynamic_loop_sum(x: wp.array(dtype=float),
+                    weights: wp.array(dtype=float),
+                    loss: wp.array(dtype=float),
+                    iters: int):
+
+        sum = float(0.0)
+        norm = float(0.0)
+
+        for i in range(iters):
+            w = weights[i]
+            norm += w
+            sum += x[i]*w
+
+        l = sum / norm
+        wp.atomic_add(loss, 0, l)
+
+    iters = 3
+    x = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    weights = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_sum, dim=1, inputs=[x, weights, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+    # [inf inf inf] (incorrect)
+
+In the backward pass, when computing the adjoint for ``sum``, which is used to compute the adjoint for the ``x`` array, there is a division by zero:
+``norm`` is not recomputed in the backward pass because dynamic loops are not replayed. This means that ``norm`` is 0.0 at the start of the adjoint calculation
+rather than the value computed in the forward pass, 3.0.
+
+There is a different remedy for this particular scenario. One can force a dynamic loop to replay in the backward pass by migrating the body of the loop to
+a Warp function::
+
+    @wp.func
+    def loop(x: wp.array(dtype=float),
+            weights: wp.array(dtype=float),
+            iters: int):
+
+        sum = float(0.0)
+        norm = float(0.0)
+
+        for i in range(iters):
+            w = weights[i]
+            norm += w
+            sum += x[i]*w
+
+        return sum, norm
+
+    @wp.kernel
+    def dynamic_loop_sum(x: wp.array(dtype=float),
+                    weights: wp.array(dtype=float),
+                    loss: wp.array(dtype=float),
+                    iters: int):
+
+        sum, norm = loop(x, weights, iters)
+
+        l = sum / norm
+        wp.atomic_add(loss, 0, l)
+
+    iters = 3
+    x = wp.full(shape=iters, value=1.0, dtype=float, requires_grad=True)
+    weights = wp.full(shape=iters, value=0.5, dtype=float, requires_grad=True)
+    loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+    with wp.Tape() as tape:
+        wp.launch(dynamic_loop_sum, dim=1, inputs=[x, weights, loss, iters])
+
+    tape.backward(loss)
+
+    print(x.grad)
+    # [.33 .33 .33] (correct)
+
+However, this only works because the ``x`` array adjoints do not require an intermediate
+value for ``sum``; they only need the adjoint of ``sum``. In general this workaround is only valid for simple add/subtract operations such as
+``+=`` or ``-=``.
+
+.. note:: 
+
+    In a subsequent release, we will enable users to force-unroll dynamic loops in some circumstances, thereby obviating these workarounds.
