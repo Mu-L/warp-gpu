@@ -56,7 +56,7 @@ from warp.fem.types import (
 )
 from warp.fem.utils import type_zero_element
 from warp.sparse import BsrMatrix, bsr_set_from_triplets, bsr_zeros
-from warp.types import type_length
+from warp.types import type_size
 from warp.utils import array_cast
 
 
@@ -1237,9 +1237,9 @@ def _launch_integrate_kernel(
         # If an output array is provided with the correct type, accumulate directly into it
         # Otherwise, grab a temporary array
         if output is None:
-            if type_length(output_dtype) == test.node_dof_count:
+            if type_size(output_dtype) == test.node_dof_count:
                 output_shape = (test.space_partition.node_count(),)
-            elif type_length(output_dtype) == 1:
+            elif type_size(output_dtype) == 1:
                 output_shape = (test.space_partition.node_count(), test.node_dof_count)
             else:
                 raise RuntimeError(
@@ -1262,8 +1262,8 @@ def _launch_integrate_kernel(
                 raise RuntimeError(f"Output array must have at least {test.space_partition.node_count()} rows")
 
             output_dtype = output.dtype
-            if type_length(output_dtype) != test.node_dof_count:
-                if type_length(output_dtype) != 1:
+            if type_size(output_dtype) != test.node_dof_count:
+                if type_size(output_dtype) != 1:
                     raise RuntimeError(
                         f"Incompatible output type {wp.types.type_repr(output_dtype)}, must be scalar or vector of length {test.node_dof_count}"
                     )
@@ -2233,7 +2233,7 @@ def _launch_interpolate_kernel(
             f"'dest' matrix must have {quadrature.total_point_count()} rows and {trial.space_partition.node_count()} columns of blocks"
         )
     if dest.block_shape[1] != trial.node_dof_count:
-        raise f"'dest' matrix blocks must have {trial.node_dof_count} columns"
+        raise RuntimeError(f"'dest' matrix blocks must have {trial.node_dof_count} columns")
 
     triplet_rows_temp = cache.borrow_temporary(temporary_store, shape=(nnz,), dtype=int, device=device)
     triplet_cols_temp = cache.borrow_temporary(temporary_store, shape=(nnz,), dtype=int, device=device)

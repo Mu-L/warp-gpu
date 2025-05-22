@@ -848,8 +848,14 @@ def quat_to_matrix(quat: Quaternion[Float]) -> Matrix[3, 3, Float]:
 
 
 @over
-def transformation(pos: Vector[3, Float], rot: Quaternion[Float], dtype: Float) -> Transformation[Float]:
-    """Construct a rigid-body transformation with translation part ``pos`` and rotation ``rot``."""
+def transformation(p: Vector[3, Float], q: Quaternion[Float], dtype: Float) -> Transformation[Float]:
+    """Construct a rigid-body transformation with translation part ``p`` and rotation ``q``."""
+    ...
+
+
+@over
+def transformation(*args: Float, dtype: Float) -> Transformation[Float]:
+    """Construct a spatial transfom vector of given dtype."""
     ...
 
 
@@ -868,6 +874,18 @@ def transform_get_translation(xform: Transformation[Float]) -> Vector[3, Float]:
 @over
 def transform_get_rotation(xform: Transformation[Float]) -> Quaternion[Float]:
     """Return the rotational part of a transform ``xform``."""
+    ...
+
+
+@over
+def transform_set_translation(xform: Transformation[Float], p: Vector[3, Float]):
+    """Set the translational part of a transform ``xform``."""
+    ...
+
+
+@over
+def transform_set_rotation(xform: Transformation[Float], q: Quaternion[Float]):
+    """Set the rotational part of a transform ``xform``."""
     ...
 
 
@@ -1118,6 +1136,17 @@ def tile_reshape(t: Tile[Any, Tuple[int, ...]], shape: Tuple[int, ...]) -> Tile[
     :param t: Input tile to reshape
     :param shape: New shape for the tile
     :returns: A tile containing the same data as the input tile, but arranged in a new shape.
+    """
+    ...
+
+
+@over
+def tile_astype(t: Tile[Scalar, Tuple[int, ...]], dtype: Scalar) -> Tile[Any, Tuple[int, ...]]:
+    """Return a new tile with the same data as the input tile, but with a different data type.
+
+    :param t: Input tile
+    :param dtype: New data type for the tile
+    :returns: A tile with the same data as the input tile, but with a different data type
     """
     ...
 
@@ -1505,34 +1534,6 @@ def tile_map(
     .. code-block:: text
 
         [1 1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8 1.9] = tile(shape=(10), storage=register)
-    """
-    ...
-
-
-@over
-def mlp(
-    weights: Array[float32],
-    bias: Array[float32],
-    activation: Callable,
-    index: int32,
-    x: Array[float32],
-    out: Array[float32],
-):
-    """Evaluate a multi-layer perceptron (MLP) layer in the form: ``out = act(weights*x + bias)``.
-
-    .. deprecated:: 1.6
-        Use :doc:`tile primitives </modules/tiles>` instead.
-
-    :param weights: A layer's network weights with dimensions ``(m, n)``.
-    :param bias: An array with dimensions ``(n)``.
-    :param activation: A ``wp.func`` function that takes a single scalar float as input and returns a scalar float as output
-    :param index: The batch item to process, typically each thread will process one item in the batch, in which case
-                  index should be ``wp.tid()``
-    :param x: The feature matrix with dimensions ``(n, b)``
-    :param out: The network output with dimensions ``(m, b)``
-
-    :note: Feature and output matrices are transposed compared to some other frameworks such as PyTorch.
-           All matrices are assumed to be stored in flattened row-major memory layout (NumPy default).
     """
     ...
 
@@ -2393,145 +2394,193 @@ def where(arr: Array[Any], value_if_true: Any, value_if_false: Any) -> Any:
 
 @over
 def atomic_add(arr: Array[Any], i: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: Array[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: Array[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: Array[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: FabricArray[Any], i: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: FabricArray[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: FabricArray[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: FabricArray[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: IndexedFabricArray[Any], i: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: IndexedFabricArray[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: IndexedFabricArray[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] += value``.
+    """
     ...
 
 
 @over
 def atomic_add(arr: IndexedFabricArray[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically add ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically adds ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] += value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: Array[Any], i: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: Array[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: Array[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: Array[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: FabricArray[Any], i: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: FabricArray[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: FabricArray[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: FabricArray[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: IndexedFabricArray[Any], i: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+    This function is automatically invoked when using the syntax ``arr[i] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: IndexedFabricArray[Any], i: Int, j: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+    This function is automatically invoked when using the syntax ``arr[i,j] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: IndexedFabricArray[Any], i: Int, j: Int, k: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k] -= value``.
+    """
     ...
 
 
 @over
 def atomic_sub(arr: IndexedFabricArray[Any], i: Int, j: Int, k: Int, l: Int, value: Any) -> Any:
-    """Atomically subtract ``value`` onto ``arr[i,j,k,l]`` and return the old value."""
+    """Atomically subtracts ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+    This function is automatically invoked when using the syntax ``arr[i,j,k,l] -= value``.
+    """
     ...
 
 
@@ -3297,7 +3346,7 @@ def tile_cholesky(A: Tile[Float, Tuple[int, int]]) -> Tile[Float, Tuple[int, int
 
 
 @over
-def tile_cholesky_solve(L: Tile[Float, Tuple[int, int]], x: Tile[Float, Tuple[int]]):
+def tile_cholesky_solve(L: Tile[Float, Tuple[int, int]], y: Tile[Float, Tuple[int]]):
     """With L such that LL^T = A, solve for x in Ax = y
 
     Note that computing the adjoint is not yet supported.
@@ -3307,8 +3356,8 @@ def tile_cholesky_solve(L: Tile[Float, Tuple[int, int]], x: Tile[Float, Tuple[in
         * float64
 
     :param L: A square, lower triangular, matrix, such that LL^T = A
-    :param x: An 1D tile of length M
-    :returns y: An 1D tile of length M such that LL^T y = x
+    :param y: A 1D tile of length M
+    :returns x: A 1D tile of length M such that LL^T x = y
     """
     ...
 
@@ -3360,6 +3409,12 @@ def len(a: Array[Any]) -> int:
 @over
 def len(a: Tile[Any, Tuple[int, ...]]) -> int:
     """Return the number of rows in a tile."""
+    ...
+
+
+@over
+def len(a: Tuple) -> int:
+    """Return the number of elements in a tuple."""
     ...
 
 

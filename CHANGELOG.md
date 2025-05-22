@@ -31,9 +31,17 @@
   ([GH-598](https://github.com/NVIDIA/warp/issues/598)).
 - Add `wp.sim.VBDIntegrator.rebuild_bvh()`, which rebuilds the BVH used for detecting self contacts.
 - Improved consistency of `warp.fem.lookup()` operator across geometries ([GH-618](https://github.com/NVIDIA/warp/pull/618)), added filtering parameters.
+- Add `wp.tile_astype()` to return a new tile with the same data but different data type. ([GH-683](https://github.com/NVIDIA/warp/issues/683)).
 - Add a [publications list](https://github.com/NVIDIA/warp/blob/main/PUBLICATIONS.md) of academic and research projects
   leveraging Warp ([GH-686](https://github.com/NVIDIA/warp/issues/686)).
 - Add `wp.map()` function to map a function over arrays, add math operators for Warp arrays ([GH-694](https://github.com/NVIDIA/warp/issues/694)).
+- Add various `wp.transform` syntax operations for loading and storing ([GH-710](https://github.com/NVIDIA/warp/issues/710)).
+
+### Removed
+
+- Remove `wp.mlp()` (deprecated in v1.6.0). Use tile primitives instead.
+- Remove `wp.autograd.plot_kernel_jacobians()` (deprecated in v1.4.0). Use `wp.autograd.jacobian_plot()` instead.
+- Document the fact that `+=` and `-=` invoke `wp.atomic_add()` and `wp.atomic_sub()`, respectively ([GH-505](https://github.com/NVIDIA/warp/issues/505)).
 
 ### Changed
 
@@ -45,6 +53,29 @@
 - Exposed new `warp.fem` operators: `node_count`, `node_index`, `element_coordinates`, `element_closest_point`.
 - Inform about class inheritance not being supported for `wp.struct`
   ([GH-656](https://github.com/NVIDIA/warp/issues/656)).
+- Warn when an incompatible data type conversion is detected when constructing an array using the
+  `__cuda_array_interface__` ([GH-624](https://github.com/NVIDIA/warp/issues/624),
+  [GH-670](https://github.com/NVIDIA/warp/issues/670)).
+- Improve support for tuples in kernels
+  ([GH-506](https://github.com/NVIDIA/warp/issues/506)).
+- Return a constant value from `len()` where possible.
+- Rename the internal function `wp.types.type_length()` to `type_size()`.
+- Lift the exact version requirement in `omni.warp` towards `omni.warp.core`
+  ([GH-702](https://github.com/NVIDIA/warp/issues/702)).
+- Rename the “Kernel Reference” documentation page to “Built-Ins Reference”, with each built-in now having
+  annotations to denote whether they are accessible only from the kernel scope or also from the Python runtime scope
+  ([GH-532](https://github.com/NVIDIA/warp/issues/532)).
+- Re-name `wp.tile_cholesky_solve` input parameters to align with docstring.
+  ([GH-726](https://github.com/NVIDIA/warp/issues/726)).
+- Remove `length` and `owner` keywords from `wp.array()` constructor (deprecated in v1.6.0). Use the `deleter` and
+  `shape` keywords instead.
+- Remove `length` and `owner` keyword arguments from `wp.array()` constructor (deprecated in v1.6.0).
+  Use the `deleter` and `shape` keywords instead.
+- Remove `kernel` keyword argument from `wp.autograd.jacobian()` and `wp.autograd.jacobian_fd()` (deprecated in v1.6.0).
+  Use the `function` keyword argument instead.
+- Remove `outputs` keyword argument from `wp.autograd.jacobian_plot()` (deprecated in v1.6.0).
+- Skip adjoint compilation for `wp.tile_matmul()` if `enable_backward` is disabled
+  ([GH-644](https://github.com/NVIDIA/warp/issues/644)).
 
 ### Fixed
 
@@ -68,8 +99,14 @@
 - Fixed tile type tool tips ([GH-714](https://github.com/NVIDIA/warp/issues/714))
 - Fix an issue with graph coloring on an empty graph ([GH-509](https://github.com/NVIDIA/warp/issues/509)).
 - Fix an integer overflow bug in the native graph coloring module ([GH-718](https://github.com/NVIDIA/warp/issues/718)).
-- Fix missing documentation for geometric structs
-  ([GH-674](https://github.com/NVIDIA/warp/issues/674)).
+- Fix missing documentation for geometric structs ([GH-674](https://github.com/NVIDIA/warp/issues/674)).
+- Fix an issue where arrays stored in structs could be garbage collected without updating the struct ctype ([GH-720](https://github.com/NVIDIA/warp/issues/720)).
+- Fix `UsdRenderer.render_points()` erroring out when passed 4 points or less
+  ([GH-708](https://github.com/NVIDIA/warp/issues/708)).
+- Fix incorrect stride initialization in tiles returned from functions taking transposed tiles as input ([GH-722](https://github.com/NVIDIA/warp/issues/722)).
+- Fix garbage collection issues with JAX FFI callbacks ([GH-711](https://github.com/NVIDIA/warp/pull/711)).
+- Fix `wp.atomic_*()` built-ins not working with some types
+  ([GH-733](https://github.com/NVIDIA/warp/issues/733)).
 
 ## [1.7.1] - 2025-04-30
 

@@ -57,6 +57,33 @@ def sametypes_create_value_func(default: TypeVar):
     return fn
 
 
+def extract_tuple(arg, as_constant=False):
+    if isinstance(arg, Var):
+        if isinstance(arg.type, warp.types.tuple_t):
+            out = arg.type.values
+        else:
+            out = (arg,)
+    elif isinstance(arg, warp.types.tuple_t):
+        out = arg.values
+    elif not isinstance(arg, Sequence):
+        out = (arg,)
+    else:
+        out = arg
+
+    if as_constant:
+        return tuple(x.constant if isinstance(x, Var) else x for x in out)
+
+    return out
+
+
+def static_len_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+    if arg_types is None:
+        return int
+
+    length = warp.types.type_length(arg_types["a"])
+    return Var(None, type=int, constant=length)
+
+
 # ---------------------------------
 # Scalar Math
 
@@ -1631,6 +1658,48 @@ def transformation_value_func(arg_types: Mapping[str, type], arg_values: Mapping
     if arg_types is None:
         return transformation(dtype=Float)
 
+    dtype = arg_values.get("dtype", None)
+
+    variadic_arg_types = arg_types.get("args", ())
+    variadic_arg_count = len(variadic_arg_types)
+    if variadic_arg_count == 0:
+        # Zero-initialization, e.g.: `wp.transform()`, `wp.transformation(dtype=wp.float16)`.
+        if dtype is None:
+            dtype = float32
+    elif variadic_arg_count == 1:
+        # Initialization by filling a value, e.g.: `wp.transform(123)`,
+        # `wp.transformation(123)`.
+        value_type = strip_reference(variadic_arg_types[0])
+        if dtype is None:
+            dtype = value_type
+        elif not warp.types.scalars_equal(value_type, dtype):
+            raise RuntimeError(
+                f"the value used to fill this transform is expected to be of the type `{dtype.__name__}`"
+            )
+    elif variadic_arg_count == 7:
+        # Initializing by value, e.g.: `wp.transform(1, 2, 3, 4, 5, 6, 7)`.
+        try:
+            value_type = scalar_infer_type(variadic_arg_types)
+        except RuntimeError:
+            raise RuntimeError("all values given when constructing a transform must have the same type") from None
+
+        if dtype is None:
+            dtype = value_type
+        elif not warp.types.scalars_equal(value_type, dtype):
+            raise RuntimeError(
+                f"all values used to initialize this transform are expected to be of the type `{dtype.__name__}`"
+            )
+
+    if dtype is None:
+        raise RuntimeError("could not infer the `dtype` argument when calling the `wp.transform()` function")
+
+    return transformation(dtype=dtype)
+
+
+def transformation_pq_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+    if arg_types is None:
+        return transformation(dtype=Float)
+
     try:
         value_type = float_infer_type(arg_types)
     except RuntimeError:
@@ -1665,14 +1734,30 @@ def transformation_dispatch_func(input_types: Mapping[str, type], return_type: A
 
 add_builtin(
     "transformation",
-    input_types={"pos": vector(length=3, dtype=Float), "rot": quaternion(dtype=Float), "dtype": Float},
+    input_types={"p": vector(length=3, dtype=Float), "q": quaternion(dtype=Float), "dtype": Float},
     defaults={"dtype": None},
-    value_func=transformation_value_func,
+    value_func=transformation_pq_value_func,
     export_func=lambda input_types: {k: v for k, v in input_types.items() if k != "dtype"},
     dispatch_func=transformation_dispatch_func,
     native_func="transform_t",
     group="Transformations",
-    doc="Construct a rigid-body transformation with translation part ``pos`` and rotation ``rot``.",
+    doc="Construct a rigid-body transformation with translation part ``p`` and rotation ``q``.",
+    export=False,
+)
+
+
+add_builtin(
+    "transformation",
+    input_types={"*args": Float, "dtype": Float},
+    defaults={"dtype": None},
+    variadic=True,
+    initializer_list_func=lambda arg_types, arg_values: len(arg_types.get("args", ())) > 1,
+    value_func=transformation_value_func,
+    export_func=lambda input_types: {k: v for k, v in input_types.items() if k not in ("dtype")},
+    dispatch_func=transformation_dispatch_func,
+    native_func="transform_t",
+    doc="Construct a spatial transfom vector of given dtype.",
+    group="Spatial Math",
     export=False,
 )
 
@@ -1723,6 +1808,40 @@ add_builtin(
     value_func=lambda arg_types, arg_values: quaternion(dtype=float_infer_type(arg_types)),
     group="Transformations",
     doc="Return the rotational part of a transform ``xform``.",
+)
+add_builtin(
+    "transform_set_translation",
+    input_types={"xform": transformation(dtype=Float), "p": vector(length=3, dtype=Float)},
+    value_type=None,
+    group="Transformations",
+    doc="Set the translational part of a transform ``xform``.",
+)
+add_builtin(
+    "transform_set_rotation",
+    input_types={"xform": transformation(dtype=Float), "q": quaternion(dtype=Float)},
+    value_type=None,
+    group="Transformations",
+    doc="Set the rotational part of a transform ``xform``.",
+)
+# performs a copy internally if wp.config.enable_vector_component_overwrites is True
+add_builtin(
+    "transform_set_translation_copy",
+    input_types={"xform": transformation(dtype=Float), "p": vector(length=3, dtype=Float)},
+    value_type=transformation(dtype=Float),
+    group="Transformations",
+    doc="Set the translational part of a transform ``xform``.",
+    hidden=True,
+    export=False,
+)
+# performs a copy internally if wp.config.enable_vector_component_overwrites is True
+add_builtin(
+    "transform_set_rotation_copy",
+    input_types={"xform": transformation(dtype=Float), "q": quaternion(dtype=Float)},
+    value_type=transformation(dtype=Float),
+    group="Transformations",
+    doc="Set the rotational part of a transform ``xform``.",
+    hidden=True,
+    export=False,
 )
 add_builtin(
     "transform_multiply",
@@ -1955,40 +2074,15 @@ add_builtin(
 # Tile-based primitives
 
 
-def tile_unpack_shape(arg_values):
-    shape = arg_values["shape"]
-
-    if not isinstance(shape, tuple):
-        # promote to tuple
-        shape = (shape,)
-
-    # check that components are constants
-    for d in shape:
-        if d is None:
-            raise ValueError("Tile functions require shape to be a compile time constant.")
-
-    return shape
-
-
-def tile_unpack_offset(arg_values, ndim=0):
-    if "offset" in arg_values:
-        offset = arg_values["offset"]
-    else:
-        offset = (0,) * ndim
-
-    if isinstance(offset, tuple):
-        return offset
-    else:
-        # promote to tuple
-        return (offset,)
-
-
 def tile_zeros_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
     # return generic type (for doc builds)
     if arg_types is None:
         return tile(dtype=Any, shape=Tuple[int, ...])
 
-    shape = tile_unpack_shape(arg_values)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
 
     if "dtype" not in arg_values:
         raise TypeError("tile_zeros() missing required keyword argument 'dtype'")
@@ -2005,13 +2099,16 @@ def tile_zeros_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str
 
 
 def tile_zeros_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
-    shape = tile_unpack_shape(arg_values)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
     dtype = arg_values["dtype"]
 
     template_args = []
     template_args.append(dtype)
-    for d in shape:
-        template_args.append(d.constant)
+    template_args.extend(shape)
 
     return ([], template_args)
 
@@ -2055,7 +2152,10 @@ def tile_ones_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str,
     if arg_types is None:
         return tile(dtype=Any, shape=Tuple[int, ...])
 
-    shape = tile_unpack_shape(arg_values)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
 
     if "dtype" not in arg_values:
         raise TypeError("tile_ones() missing required keyword argument 'dtype'")
@@ -2072,13 +2172,16 @@ def tile_ones_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str,
 
 
 def tile_ones_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
-    shape = tile_unpack_shape(arg_values)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
     dtype = arg_values["dtype"]
 
     template_args = []
     template_args.append(dtype)
-    for d in shape:
-        template_args.append(d.constant)
+    template_args.extend(shape)
 
     return ([], template_args)
 
@@ -2223,8 +2326,15 @@ def tile_load_tuple_value_func(arg_types: Mapping[str, type], arg_values: Mappin
 
     a = arg_types["a"]
 
-    shape = tile_unpack_shape(arg_values)
-    offset = tile_unpack_offset(arg_values, a.ndim)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
+    if "offset" in arg_values:
+        offset = extract_tuple(arg_values["offset"])
+    else:
+        offset = (0,) * a.ndim
 
     if a.ndim != len(shape):
         raise ValueError(
@@ -2244,11 +2354,18 @@ def tile_load_tuple_value_func(arg_types: Mapping[str, type], arg_values: Mappin
 
 def tile_load_tuple_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
     a = args["a"]
-    shape = tile_unpack_shape(args)
-    offset = tile_unpack_offset(args, a.type.ndim)
+    shape = extract_tuple(args["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
+    if "offset" in args:
+        offset = extract_tuple(args["offset"])
+    else:
+        offset = (0,) * a.type.ndim
 
     func_args = (a, *offset)
-    template_args = (d.constant for d in shape)
+    template_args = shape
 
     return (func_args, template_args)
 
@@ -2295,7 +2412,10 @@ def tile_store_value_func(arg_types, arg_values):
     a = arg_types["a"]
     t = arg_types["t"]
 
-    c = tile_unpack_offset(arg_types, a.ndim)
+    if "offset" in arg_types:
+        c = extract_tuple(arg_values["offset"])
+    else:
+        c = (0,) * a.ndim
 
     if len(c) != a.ndim:
         raise ValueError(
@@ -2321,7 +2441,10 @@ def tile_store_dispatch_func(input_types: Mapping[str, type], return_type: Any, 
     a = args["a"]
     t = args["t"]
 
-    offset = tile_unpack_offset(args, a.type.ndim)
+    if "offset" in args:
+        offset = extract_tuple(args["offset"])
+    else:
+        offset = (0,) * a.type.ndim
 
     func_args = (a, *offset, t)
     template_args = []
@@ -2371,7 +2494,11 @@ def tile_atomic_add_value_func(arg_types, arg_values):
     a = arg_types["a"]
     t = arg_types["t"]
 
-    c = tile_unpack_offset(arg_types, a.ndim)
+    if "offset" in arg_types:
+        c = extract_tuple(arg_values["offset"])
+    else:
+        c = (0,) * a.ndim
+
     if len(c) != a.ndim:
         raise ValueError(
             f"tile_atomic_add() 'a' argument must have {len(c)} dimensions, "
@@ -2389,14 +2516,21 @@ def tile_atomic_add_value_func(arg_types, arg_values):
             f"tile_atomic_add() 'a' and 't' arguments must have the same dtype, got {arg_types['a'].dtype} and {arg_types['t'].dtype}"
         )
 
-    return tile(dtype=arg_types["t"].dtype, shape=arg_types["t"].shape, storage=arg_types["t"].storage)
+    return tile(
+        dtype=arg_types["t"].dtype,
+        shape=arg_types["t"].shape,
+        storage=arg_types["t"].storage,
+    )
 
 
 def tile_atomic_add_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
     a = args["a"]
     t = args["t"]
 
-    offset = tile_unpack_offset(args, a.type.ndim)
+    if "offset" in args:
+        offset = extract_tuple(args["offset"])
+    else:
+        offset = (0,) * a.type.ndim
 
     func_args = (a, *offset, t)
     template_args = []
@@ -2443,7 +2577,7 @@ def tile_view_value_func(arg_types, arg_values):
         return tile(dtype=Any, shape=Tuple[int, ...])
 
     tile_type = arg_types["t"]
-    offset = arg_types["offset"]
+    offset = extract_tuple(arg_values["offset"])
 
     if len(offset) > len(tile_type.shape):
         raise ValueError(f"tile_view() specified too many offset coordinates {len(offset)} > {len(tile_type.shape)}")
@@ -2451,7 +2585,7 @@ def tile_view_value_func(arg_types, arg_values):
     if "shape" in arg_values:
         # if shape is specified take it directly, e.g.:
         # tile_view(t, offset=(i,j), shape=(m,n))
-        shape = arg_values["shape"]
+        shape = extract_tuple(arg_values["shape"], as_constant=True)
         strides = tile_type.strides
 
         if len(shape) != len(tile_type.shape):
@@ -2477,14 +2611,17 @@ def tile_view_value_func(arg_types, arg_values):
 
 def tile_view_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
     tile = arg_values["t"]
-    coord = arg_values["offset"]
+    coord = extract_tuple(arg_values["offset"])
 
     # zero-pad coord to match source array
     view_coord = [0] * len(tile.type.shape)
     for i in range(len(coord)):
         view_coord[i] = coord[i]
 
-    return ((tile, *view_coord), (return_type,))
+    func_args = (tile, *view_coord)
+    template_args = (return_type,)
+
+    return (func_args, template_args)
 
 
 add_builtin(
@@ -2519,7 +2656,7 @@ def tile_squeeze_value_func(arg_types, arg_values):
     if "axis" in arg_values:
         axis = arg_values["axis"]
 
-        if not isinstance(axis, tuple):
+        if not isinstance(axis, Sequence):
             # promote to tuple
             axis = (axis,)
 
@@ -2591,7 +2728,10 @@ def tile_reshape_value_func(arg_types, arg_values):
     for s in tile_type.shape:
         size *= int(s)
 
-    shape = tile_unpack_shape(arg_values)
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
 
     # check for -1 dimension and reformat
     if -1 in shape:
@@ -2657,6 +2797,39 @@ add_builtin(
 )
 
 
+def tile_astype_value_func(arg_types, arg_values):
+    # return generic type (for doc builds)
+    if arg_types is None:
+        return tile(dtype=Any, shape=Tuple[int, ...])
+
+    tile_type = arg_types["t"]
+    dtype = arg_values["dtype"]
+
+    return tile(dtype=dtype, shape=tile_type.shape)
+
+
+def tile_astype_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
+    tile = arg_values["t"]
+
+    return ((tile,), (return_type,))
+
+
+add_builtin(
+    "tile_astype",
+    input_types={"t": tile(dtype=Scalar, shape=Tuple[int, ...]), "dtype": Scalar},
+    value_func=tile_astype_value_func,
+    dispatch_func=tile_astype_dispatch_func,
+    variadic=False,
+    doc="""Return a new tile with the same data as the input tile, but with a different data type.
+
+    :param t: Input tile
+    :param dtype: New data type for the tile
+    :returns: A tile with the same data as the input tile, but with a different data type""",
+    group="Tile Primitives",
+    export=False,
+)
+
+
 def tile_assign_value_func(arg_types, arg_values):
     if arg_types is None:
         return None
@@ -2670,7 +2843,10 @@ def tile_assign_dispatch_func(input_types: Mapping[str, type], return_type: Any,
     dst = args["dst"]
     src = args["src"]
 
-    offset = tile_unpack_offset(args, len(dst.type.shape))
+    if "offset" in args:
+        offset = extract_tuple(args["offset"])
+    else:
+        offset = (0,) * len(dst.type.shape)
 
     func_args = (dst, src, *offset)
     template_args = []
@@ -3112,7 +3288,11 @@ def tile_broadcast_value_func(arg_types, arg_values):
     t = arg_types["a"]
 
     # target shape and strides
-    target_shape = tile_unpack_shape(arg_values)
+    target_shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in target_shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
     target_strides = [0] * len(target_shape)
 
     offset = len(target_shape) - len(t.shape)
@@ -3808,50 +3988,6 @@ add_builtin(
 )
 
 
-def mlp_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-    warp.utils.warn(
-        "wp.mlp() is deprecated and will be removed in a future\nversion. Use tile primitives instead.",
-        category=DeprecationWarning,
-    )
-
-    func_args = tuple(args.values())
-    template_args = ()
-
-    return (func_args, template_args)
-
-
-add_builtin(
-    "mlp",
-    input_types={
-        "weights": array(dtype=float, ndim=2),
-        "bias": array(dtype=float, ndim=1),
-        "activation": Callable,
-        "index": int,
-        "x": array(dtype=float, ndim=2),
-        "out": array(dtype=float, ndim=2),
-    },
-    value_type=None,
-    dispatch_func=mlp_dispatch_func,
-    skip_replay=True,
-    doc="""Evaluate a multi-layer perceptron (MLP) layer in the form: ``out = act(weights*x + bias)``.
-
-    .. deprecated:: 1.6
-        Use :doc:`tile primitives </modules/tiles>` instead.
-
-    :param weights: A layer's network weights with dimensions ``(m, n)``.
-    :param bias: An array with dimensions ``(n)``.
-    :param activation: A ``wp.func`` function that takes a single scalar float as input and returns a scalar float as output
-    :param index: The batch item to process, typically each thread will process one item in the batch, in which case
-                  index should be ``wp.tid()``
-    :param x: The feature matrix with dimensions ``(n, b)``
-    :param out: The network output with dimensions ``(m, b)``
-
-    :note: Feature and output matrices are transposed compared to some other frameworks such as PyTorch.
-           All matrices are assumed to be stored in flattened row-major memory layout (NumPy default).""",
-    group="Utility",
-)
-
-
 # ---------------------------------
 # Geometry
 
@@ -4442,7 +4578,7 @@ def _check_volume_type_is_supported(dtype):
 
 def check_volume_value_grad_compatibility(dtype, grad_dtype):
     if type_is_vector(dtype):
-        expected = matrix(shape=(type_length(dtype), 3), dtype=type_scalar_type(dtype))
+        expected = matrix(shape=(type_size(dtype), 3), dtype=type_scalar_type(dtype))
     else:
         expected = vector(length=3, dtype=dtype)
 
@@ -5233,7 +5369,7 @@ def array_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any
         return array(dtype=Scalar)
 
     dtype = arg_values["dtype"]
-    shape = arg_values["shape"]
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
     return array(dtype=dtype, ndim=len(shape))
 
 
@@ -5243,8 +5379,9 @@ def array_dispatch_func(input_types: Mapping[str, type], return_type: Any, args:
     # to the underlying C++ function's runtime and template params.
 
     dtype = return_type.dtype
+    shape = extract_tuple(args["shape"], as_constant=True)
 
-    func_args = (args["ptr"], *args["shape"])
+    func_args = (args["ptr"], *shape)
     template_args = (dtype,)
     return (func_args, template_args)
 
@@ -5458,46 +5595,78 @@ add_builtin(
 )
 
 
+SUPPORTED_ATOMIC_TYPES = (
+    warp.int32,
+    warp.int64,
+    warp.uint32,
+    warp.uint64,
+    warp.float32,
+    warp.float64,
+)
+
+
 def atomic_op_constraint(arg_types: Mapping[str, Any]):
     idx_types = tuple(arg_types[x] for x in "ijkl" if arg_types.get(x, None) is not None)
     return all(types_equal(idx_types[0], t) for t in idx_types[1:]) and arg_types["arr"].ndim == len(idx_types)
 
 
-def atomic_op_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
-    if arg_types is None:
-        return Any
+def create_atomic_op_value_func(op: str):
+    def fn(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+        if arg_types is None:
+            return Any
 
-    arr_type = arg_types["arr"]
-    value_type = arg_types["value"]
-    idx_types = tuple(arg_types[x] for x in "ijkl" if arg_types.get(x, None) is not None)
+        arr_type = arg_types["arr"]
+        value_type = arg_types["value"]
+        idx_types = tuple(arg_types[x] for x in "ijkl" if arg_types.get(x, None) is not None)
 
-    if not is_array(arr_type):
-        raise RuntimeError("atomic() first argument must be an array")
+        if not is_array(arr_type):
+            raise RuntimeError(f"atomic_{op}() first argument must be an array")
 
-    idx_count = len(idx_types)
+        idx_count = len(idx_types)
 
-    if idx_count < arr_type.ndim:
-        raise RuntimeError(
-            "Num indices < num dimensions for atomic, this is a codegen error, should have generated a view instead"
-        )
+        if idx_count < arr_type.ndim:
+            raise RuntimeError(
+                f"Num indices < num dimensions for atomic_{op}(), this is a codegen error, should have generated a view instead"
+            )
 
-    if idx_count > arr_type.ndim:
-        raise RuntimeError(
-            f"Num indices > num dimensions for atomic, received {idx_count}, but array only has {arr_type.ndim}"
-        )
+        if idx_count > arr_type.ndim:
+            raise RuntimeError(
+                f"Num indices > num dimensions for atomic_{op}(), received {idx_count}, but array only has {arr_type.ndim}"
+            )
 
-    # check index types
-    for t in idx_types:
-        if not type_is_int(t):
-            raise RuntimeError(f"atomic() index arguments must be of integer type, got index of type {type_repr(t)}")
+        # check index types
+        for t in idx_types:
+            if not type_is_int(t):
+                raise RuntimeError(
+                    f"atomic_{op}() index arguments must be of integer type, got index of type {type_repr(t)}"
+                )
 
-    # check value type
-    if not types_equal(arr_type.dtype, value_type):
-        raise RuntimeError(
-            f"atomic() value argument type ({type_repr(value_type)}) must be of the same type as the array ({type_repr(arr_type.dtype)})"
-        )
+        # check value type
+        if not types_equal(arr_type.dtype, value_type):
+            raise RuntimeError(
+                f"atomic_{op}() value argument type ({type_repr(value_type)}) must be of the same type as the array ({type_repr(arr_type.dtype)})"
+            )
 
-    return arr_type.dtype
+        scalar_type = getattr(arr_type.dtype, "_wp_scalar_type_", arr_type.dtype)
+        if op in ("add", "sub"):
+            supported_atomic_types = (*SUPPORTED_ATOMIC_TYPES, warp.float16)
+            if not any(types_equal(scalar_type, x, match_generic=True) for x in supported_atomic_types):
+                raise RuntimeError(
+                    f"atomic_{op}() operations only work on arrays with [u]int32, [u]int64, float16, float32, or float64 "
+                    f"as the underlying scalar types, but got {type_repr(arr_type.dtype)} (with scalar type {type_repr(scalar_type)})"
+                )
+        elif op in ("min", "max"):
+            if not any(types_equal(scalar_type, x, match_generic=True) for x in SUPPORTED_ATOMIC_TYPES):
+                raise RuntimeError(
+                    f"atomic_{op}() operations only work on arrays with [u]int32, [u]int64, float32, or float64 "
+                    f"as the underlying scalar types, but got {type_repr(arr_type.dtype)} (with scalar type {type_repr(scalar_type)})"
+                )
+        else:
+            raise NotImplementedError
+
+        return arr_type.dtype
+
+    return fn
 
 
 def atomic_op_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
@@ -5522,9 +5691,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("add"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically add ``value`` onto ``arr[i]`` and return the old value.",
+        doc="""Atomically adds ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+        This function is automatically invoked when using the syntax ``arr[i] += value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5533,9 +5703,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("add"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically add ``value`` onto ``arr[i,j]`` and return the old value.",
+        doc="""Atomically adds ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+        This function is automatically invoked when using the syntax ``arr[i,j] += value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5544,9 +5715,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("add"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically add ``value`` onto ``arr[i,j,k]`` and return the old value.",
+        doc="""Atomically adds ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+        This function is automatically invoked when using the syntax ``arr[i,j,k] += value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5555,9 +5727,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("add"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically add ``value`` onto ``arr[i,j,k,l]`` and return the old value.",
+        doc="""Atomically adds ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+        This function is automatically invoked when using the syntax ``arr[i,j,k,l] += value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5567,9 +5740,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("sub"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically subtract ``value`` onto ``arr[i]`` and return the old value.",
+        doc="""Atomically subtracts ``value`` onto ``arr[i]`` and returns the original value of ``arr[i]``.
+        This function is automatically invoked when using the syntax ``arr[i] -= value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5578,9 +5752,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("sub"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically subtract ``value`` onto ``arr[i,j]`` and return the old value.",
+        doc="""Atomically subtracts ``value`` onto ``arr[i,j]`` and returns the original value of ``arr[i,j]``.
+        This function is automatically invoked when using the syntax ``arr[i,j] -= value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5589,9 +5764,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("sub"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically subtract ``value`` onto ``arr[i,j,k]`` and return the old value.",
+        doc="""Atomically subtracts ``value`` onto ``arr[i,j,k]`` and returns the original value of ``arr[i,j,k]``.
+        This function is automatically invoked when using the syntax ``arr[i,j,k] -= value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5600,9 +5776,10 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("sub"),
         dispatch_func=atomic_op_dispatch_func,
-        doc="Atomically subtract ``value`` onto ``arr[i,j,k,l]`` and return the old value.",
+        doc="""Atomically subtracts ``value`` onto ``arr[i,j,k,l]`` and returns the original value of ``arr[i,j,k,l]``.
+        This function is automatically invoked when using the syntax ``arr[i,j,k,l] -= value``.""",
         group="Utility",
         skip_replay=True,
     )
@@ -5612,7 +5789,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
@@ -5625,7 +5802,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
@@ -5638,7 +5815,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
@@ -5651,7 +5828,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
@@ -5665,7 +5842,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
@@ -5678,7 +5855,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
@@ -5691,7 +5868,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
@@ -5704,7 +5881,7 @@ for array_type in array_types:
         hidden=hidden,
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
-        value_func=atomic_op_value_func,
+        value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_op_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
@@ -5795,6 +5972,16 @@ add_builtin(
     group="Utility",
     skip_replay=True,
 )
+# implements &transformation[index]
+add_builtin(
+    "index",
+    input_types={"a": transformation(dtype=Float), "i": int},
+    value_func=vector_index_value_func,
+    dispatch_func=vector_index_dispatch_func,
+    hidden=True,
+    group="Utility",
+    skip_replay=True,
+)
 # implements &(*vector)[index]
 add_builtin(
     "indexref",
@@ -5809,6 +5996,16 @@ add_builtin(
 add_builtin(
     "indexref",
     input_types={"a": quaternion(dtype=Float), "i": int},
+    value_func=vector_index_value_func,
+    dispatch_func=vector_index_dispatch_func,
+    hidden=True,
+    group="Utility",
+    skip_replay=True,
+)
+# implements &(*transformation)[index]
+add_builtin(
+    "indexref",
+    input_types={"a": transformation(dtype=Float), "i": int},
     value_func=vector_index_value_func,
     dispatch_func=vector_index_dispatch_func,
     hidden=True,
@@ -5831,6 +6028,15 @@ add_builtin(
 add_builtin(
     "assign_inplace",
     input_types={"a": quaternion(dtype=Scalar), "i": int, "value": Scalar},
+    value_type=None,
+    hidden=True,
+    export=False,
+    group="Utility",
+)
+# implements transformation[index] = value
+add_builtin(
+    "assign_inplace",
+    input_types={"a": transformation(dtype=Scalar), "i": int, "value": Scalar},
     value_type=None,
     hidden=True,
     export=False,
@@ -5861,6 +6067,15 @@ add_builtin(
     group="Utility",
 )
 
+# implements transformation[index] = value, performs a copy internally if wp.config.enable_vector_component_overwrites is True
+add_builtin(
+    "assign_copy",
+    input_types={"a": transformation(dtype=Scalar), "i": int, "value": Scalar},
+    value_func=vector_assign_value_func,
+    hidden=True,
+    group="Utility",
+)
+
 # implements vector[idx] += scalar
 add_builtin(
     "add_inplace",
@@ -5881,6 +6096,26 @@ add_builtin(
     group="Utility",
 )
 
+# implements transformation[idx] += scalar
+add_builtin(
+    "add_inplace",
+    input_types={"a": transformation(dtype=Float), "i": int, "value": Float},
+    value_type=None,
+    hidden=True,
+    export=False,
+    group="Utility",
+)
+
+# implements transformation.p += vec3
+add_builtin(
+    "transform_add_inplace",
+    input_types={"a": transformation(dtype=Float), "value": vector(length=3, dtype=Float)},
+    value_type=None,
+    hidden=True,
+    export=False,
+    group="Utility",
+)
+
 # implements vector[idx] -= scalar
 add_builtin(
     "sub_inplace",
@@ -5895,6 +6130,26 @@ add_builtin(
 add_builtin(
     "sub_inplace",
     input_types={"a": quaternion(dtype=Scalar), "i": int, "value": Scalar},
+    value_type=None,
+    hidden=True,
+    export=False,
+    group="Utility",
+)
+
+# implements transformation[idx] -= scalar
+add_builtin(
+    "sub_inplace",
+    input_types={"a": transformation(dtype=Scalar), "i": int, "value": Scalar},
+    value_type=None,
+    hidden=True,
+    export=False,
+    group="Utility",
+)
+
+# implements transformation.p -= vec3
+add_builtin(
+    "transform_sub_inplace",
+    input_types={"a": transformation(dtype=Float), "value": vector(length=3, dtype=Float)},
     value_type=None,
     hidden=True,
     export=False,
@@ -6803,7 +7058,7 @@ def tile_diag_add_value_func(arg_types, arg_values):
         )
 
     # use first argument to define output type
-    return tile(dtype=a.dtype, shape=a.shape, storage="shared")
+    return tile(dtype=a.dtype, shape=a.shape, strides=a.strides, storage="shared")
 
 
 def tile_diag_add_lto_dispatch_func(
@@ -6953,36 +7208,41 @@ def tile_matmul_lto_dispatch_func(
             num_threads,
             builder,
         )
-        # adjA += adjC * B^T - Transpose ~= flipped layout
-        (fun_backward_A, lto_backward_A) = warp.build.build_lto_dot(
-            M,
-            K,
-            N,
-            out.type.dtype,
-            b.type.dtype,
-            a.type.dtype,
-            out.type.layout,
-            tile_flip_layout(b.type.layout),
-            a.type.layout,
-            arch,
-            num_threads,
-            builder,
-        )
-        # adjB += A^T * adjC - Transpose ~= flipped layout
-        (fun_backward_B, lto_backward_B) = warp.build.build_lto_dot(
-            K,
-            N,
-            M,
-            a.type.dtype,
-            out.type.dtype,
-            b.type.dtype,
-            tile_flip_layout(a.type.layout),
-            out.type.layout,
-            b.type.layout,
-            arch,
-            num_threads,
-            builder,
-        )
+        if warp.config.enable_backward:
+            # adjA += adjC * B^T - Transpose ~= flipped layout
+            (fun_backward_A, lto_backward_A) = warp.build.build_lto_dot(
+                M,
+                K,
+                N,
+                out.type.dtype,
+                b.type.dtype,
+                a.type.dtype,
+                out.type.layout,
+                tile_flip_layout(b.type.layout),
+                a.type.layout,
+                arch,
+                num_threads,
+                builder,
+            )
+            # adjB += A^T * adjC - Transpose ~= flipped layout
+            (fun_backward_B, lto_backward_B) = warp.build.build_lto_dot(
+                K,
+                N,
+                M,
+                a.type.dtype,
+                out.type.dtype,
+                b.type.dtype,
+                tile_flip_layout(a.type.layout),
+                out.type.layout,
+                b.type.layout,
+                arch,
+                num_threads,
+                builder,
+            )
+        else:
+            # adjoints aren't computed, so we reuse fun_forward as a dummy arg
+            (fun_backward_A, lto_backward_A) = (fun_forward, None)
+            (fun_backward_B, lto_backward_B) = (fun_forward, None)
 
         return (
             (
@@ -7298,30 +7558,30 @@ def tile_cholesky_solve_generic_value_func(arg_types, arg_values):
         raise TypeError("tile_cholesky_solve() requires exactly 2 positional args")
 
     l = arg_types["L"]
-    x = arg_types["x"]
+    y = arg_types["y"]
 
     if not is_tile(l):
         raise TypeError(f"tile_cholesky_solve() 'L' argument must be a tile, got {l!r}")
 
-    if not is_tile(x):
-        raise TypeError(f"tile_cholesky_solve() 'x' argument must be a tile, got {l!r}")
+    if not is_tile(y):
+        raise TypeError(f"tile_cholesky_solve() 'y' argument must be a tile, got {l!r}")
 
-    if not types_equal(l.dtype, x.dtype):
-        raise TypeError(f"tile_cholesky_solve() arguments must have the same dtype, got {l.dtype} and {x.dtype}")
+    if not types_equal(l.dtype, y.dtype):
+        raise TypeError(f"tile_cholesky_solve() arguments must have the same dtype, got {l.dtype} and {y.dtype}")
 
     if l.shape[0] != l.shape[1]:
         raise ValueError("tile_cholesky_solve() 'L' argument must be square")
 
-    if len(x.shape) != 1:
-        raise TypeError("tile_cholesky_solve() 'x' argument must be a 1D tile")
+    if len(y.shape) != 1:
+        raise TypeError("tile_cholesky_solve() 'y' argument must be a 1D tile")
 
-    if x.shape[0] != l.shape[0]:
+    if y.shape[0] != l.shape[0]:
         raise ValueError(
-            f"tile_cholesky_solve() 'x' argument must have the same number of elements as the number of rows in 'L', "
-            f"got {x.shape[0]} elements in 'x' and {l.shape[0]} rows in 'L'"
+            f"tile_cholesky_solve() 'y' argument must have the same number of elements as the number of rows in 'L', "
+            f"got {y.shape[0]} elements in 'x' and {l.shape[0]} rows in 'L'"
         )
 
-    return tile(dtype=l.dtype, shape=x.shape, storage="shared")
+    return tile(dtype=l.dtype, shape=y.shape, storage="shared")
 
 
 def tile_cholesky_solve_generic_lto_dispatch_func(
@@ -7333,29 +7593,29 @@ def tile_cholesky_solve_generic_lto_dispatch_func(
     builder: warp.context.ModuleBuilder,
 ):
     L = arg_values["L"]
-    x = arg_values["x"]
+    y = arg_values["y"]
     # force the storage type of the input variables to shared memory
     L.type.storage = "shared"
-    x.type.storage = "shared"
+    y.type.storage = "shared"
 
     if len(return_values) != 1:
         raise TypeError(f"tile_cholesky_solve() must return exactly one value, got {len(return_values)}")
 
-    y = return_values[0]
+    x = return_values[0]
 
-    if any(T not in cusolver_type_map.keys() for T in [x.type.dtype, L.type.dtype]):
+    if any(T not in cusolver_type_map.keys() for T in [y.type.dtype, L.type.dtype]):
         raise TypeError("tile_cholesky_solve() arguments be tiles of float64 or float32")
 
     dtype, precision_enum = cusolver_type_map[L.type.dtype]
     M, N = L.type.shape[0], L.type.shape[1]
 
-    if len(y.type.shape) != 1:
+    if len(x.type.shape) != 1:
         raise TypeError("tile_cholesky_solve() output vector must be 1D")
 
-    if y.type.shape[0] != M:
+    if x.type.shape[0] != M:
         raise ValueError(
             "tile_cholesky_solve() output vector must have same number of elements as the number of rows in 'L' "
-            f"got {y.type.shape[0]} elements in output and {M} rows in 'L'"
+            f"got {x.type.shape[0]} elements in output and {M} rows in 'L'"
         )
 
     solver = "potrs"
@@ -7371,7 +7631,7 @@ def tile_cholesky_solve_generic_lto_dispatch_func(
 
     if arch is None or not warp.context.runtime.core.is_mathdx_enabled():
         # CPU/no-MathDx dispatch
-        return ((0, L, x, y), [], [], 0)
+        return ((0, L, y, x), [], [], 0)
     else:
         # generate the LTO
         lto_symbol, lto_code_data = warp.build.build_lto_solver(
@@ -7387,12 +7647,12 @@ def tile_cholesky_solve_generic_lto_dispatch_func(
             builder,
         )
 
-        return ((Var(lto_symbol, str, False, True, False), L, x, y), [], [lto_code_data], 0)
+        return ((Var(lto_symbol, str, False, True, False), L, y, x), [], [lto_code_data], 0)
 
 
 add_builtin(
     "tile_cholesky_solve",
-    input_types={"L": tile(dtype=Float, shape=Tuple[int, int]), "x": tile(dtype=Float, shape=Tuple[int])},
+    input_types={"L": tile(dtype=Float, shape=Tuple[int, int]), "y": tile(dtype=Float, shape=Tuple[int])},
     value_func=tile_cholesky_solve_generic_value_func,
     lto_dispatch_func=tile_cholesky_solve_generic_lto_dispatch_func,
     variadic=True,
@@ -7405,8 +7665,8 @@ add_builtin(
         * float64
 
     :param L: A square, lower triangular, matrix, such that LL^T = A
-    :param x: An 1D tile of length M
-    :returns y: An 1D tile of length M such that LL^T y = x""",
+    :param y: A 1D tile of length M
+    :returns x: A 1D tile of length M such that LL^T x = y""",
     group="Tile Primitives",
     export=False,
     namespace="",
@@ -7481,7 +7741,7 @@ def tile_lower_solve_generic_value_func(arg_types, arg_values):
             f"got {y.shape[0]} elements in 'y' and {l.shape[0]} rows in 'L'"
         )
 
-    return tile(dtype=l.dtype, shape=y.shape, storage="shared")
+    return tile(dtype=l.dtype, shape=y.shape, strides=y.strides, storage="shared")
 
 
 add_builtin(
@@ -7578,7 +7838,7 @@ def tile_upper_solve_generic_value_func(arg_types, arg_values):
             f"got {z.shape[0]} elements in 'z' and {u.shape[0]} rows in 'U'"
         )
 
-    return tile(dtype=u.dtype, shape=z.shape, storage="shared")
+    return tile(dtype=u.dtype, shape=z.shape, strides=z.strides, storage="shared")
 
 
 add_builtin(
@@ -7643,7 +7903,7 @@ def static(expr):
 add_builtin(
     "len",
     input_types={"a": vector(length=Any, dtype=Scalar)},
-    value_type=int,
+    value_func=static_len_value_func,
     doc="Return the number of elements in a vector.",
     group="Utility",
     export=False,
@@ -7652,7 +7912,7 @@ add_builtin(
 add_builtin(
     "len",
     input_types={"a": quaternion(dtype=Scalar)},
-    value_type=int,
+    value_func=static_len_value_func,
     doc="Return the number of elements in a quaternion.",
     group="Utility",
     export=False,
@@ -7661,7 +7921,7 @@ add_builtin(
 add_builtin(
     "len",
     input_types={"a": matrix(shape=(Any, Any), dtype=Scalar)},
-    value_type=int,
+    value_func=static_len_value_func,
     doc="Return the number of rows in a matrix.",
     group="Utility",
     export=False,
@@ -7670,7 +7930,7 @@ add_builtin(
 add_builtin(
     "len",
     input_types={"a": transformation(dtype=Float)},
-    value_type=int,
+    value_func=static_len_value_func,
     doc="Return the number of elements in a transformation.",
     group="Utility",
     export=False,
@@ -7688,8 +7948,82 @@ add_builtin(
 add_builtin(
     "len",
     input_types={"a": tile(dtype=Any, shape=Tuple[int, ...])},
-    value_type=int,
+    value_func=static_len_value_func,
     doc="Return the number of rows in a tile.",
+    group="Utility",
+    export=False,
+)
+
+
+# ---------------------------------
+# Tuple
+
+
+def tuple_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+    return tuple_t(arg_types["args"], arg_values["args"])
+
+
+def tuple_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    func_args = args.get("args", ())
+    template_args = ()
+    return (func_args, template_args)
+
+
+add_builtin(
+    "tuple",
+    input_types={"*args": Any},
+    value_func=tuple_value_func,
+    dispatch_func=tuple_dispatch_func,
+    variadic=True,
+    doc="Construct a tuple from a list of values",
+    group="Utility",
+    hidden=True,
+    missing_grad=True,
+    export=False,
+)
+
+
+def tuple_extract_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+    tuple_type = arg_types["a"]
+    elements = tuple_type.types if is_tuple(tuple_type) else tuple_type
+
+    if "i" not in arg_values:
+        raise RuntimeError("Tuple index must be a compile time expression.")
+
+    index = arg_values["i"]
+    if isinstance(index, Var):
+        raise RuntimeError("Tuple index must be a compile time expression.")
+
+    length = len(elements)
+    if index >= length:
+        raise RuntimeError(f"Tuple index out of bounds, {index} >= {length}")
+
+    value_type = elements[index]
+    return value_type
+
+
+def tuple_extract_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    func_args = (args["a"],)
+    template_args = (args["i"].constant,)
+    return (func_args, template_args)
+
+
+add_builtin(
+    "extract",
+    input_types={"a": Tuple, "i": int},
+    value_func=tuple_extract_value_func,
+    dispatch_func=tuple_extract_dispatch_func,
+    group="Utility",
+    hidden=True,
+    missing_grad=True,
+)
+
+
+add_builtin(
+    "len",
+    input_types={"a": Tuple},
+    value_func=static_len_value_func,
+    doc="Return the number of elements in a tuple.",
     group="Utility",
     export=False,
 )
