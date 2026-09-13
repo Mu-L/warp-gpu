@@ -309,7 +309,7 @@ add_function_test(
         data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
         block_dim=1,
     ),
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     check_output=False,
 )
 add_function_test(
@@ -322,7 +322,7 @@ add_function_test(
         data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
         block_dim=1,
     ),
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     check_output=False,
 )
 add_function_test(
@@ -335,7 +335,7 @@ add_function_test(
         data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
         block_dim=1,
     ),
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     check_output=False,
 )
 add_function_test(
@@ -348,7 +348,7 @@ add_function_test(
         data_shape=(FFT_SIZE_NPO2, 2 * FFT_SIZE_NPO2),
         block_dim=1,
     ),
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     check_output=False,
 )
 
@@ -431,7 +431,7 @@ for name, func in cpu_block_fft_tests:
         TestTileFFT,
         name,
         func,
-        devices=["cpu"] if wp.is_cpu_available() else [],
+        devices=get_cpu_test_devices(),
         check_output=False,
         enable_cpu_blocks=True,
     )

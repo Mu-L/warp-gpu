@@ -710,7 +710,7 @@ for name, func in cpu_block_tests:
         TestTileSolve,
         f"{name}_cpu_blocks",
         func,
-        devices=["cpu"] if wp.is_cpu_available() else [],
+        devices=get_cpu_test_devices(),
         check_output=False,
         enable_cpu_blocks=True,
     )

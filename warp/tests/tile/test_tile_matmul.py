@@ -16,6 +16,11 @@ TILE_K = wp.constant(8)
 # num threads per-tile
 TILE_DIM = 64
 
+# These tests retain their original 32-thread launches. Keep their kernels in one shared Warp module so the large
+# default module above is not compiled for a second block dimension; using module="unique" would instead compile
+# each closely related kernel separately.
+MATMUL_32_BLOCK_DIM = 32
+
 
 @wp.kernel
 def tile_grouped_gemm(A: wp.array3d[float], B: wp.array3d[float], C: wp.array3d[float]):
@@ -119,6 +124,180 @@ def test_tile_gemm(dtype):
         assert_np_equal(B_wp.grad.numpy(), A.T @ adj_C, 1.0e-1)
 
     return test
+
+
+@wp.kernel(module="test_tile_matmul_32")
+def tile_matmul_mixed_precision_kernel(A: wp.array2d[wp.float16], B: wp.array2d[wp.float32], C: wp.array2d[wp.float64]):
+    i, j = wp.tid()
+    a = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(i * TILE_M, j * TILE_K))
+    b = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(i * TILE_K, j * TILE_N))
+    c = wp.tile_load(C, shape=(TILE_M, TILE_N), offset=(i * TILE_M, j * TILE_N))
+    wp.tile_matmul(a, b, c, alpha=0.5, beta=-1.3)
+    wp.tile_store(C, c, offset=(i * TILE_M, j * TILE_N))
+
+
+def test_tile_matmul_mixed_precision(test, device):
+    """Multiply mixed-precision tiles and propagate gradients for all operands."""
+
+    rng = np.random.default_rng(42)
+
+    A = rng.random((TILE_M, TILE_K), dtype=np.float64).astype(np.float16)
+    B = rng.random((TILE_K, TILE_N), dtype=np.float32)
+    C = rng.random((TILE_M, TILE_N), dtype=np.float64)
+
+    A_wp = wp.array(A, requires_grad=True, device=device)
+    B_wp = wp.array(B, requires_grad=True, device=device)
+    C_wp = wp.array(C, requires_grad=True, device=device)
+
+    with wp.Tape() as tape:
+        wp.launch_tiled(
+            tile_matmul_mixed_precision_kernel,
+            dim=[1, 1],
+            inputs=[A_wp, B_wp, C_wp],
+            block_dim=MATMUL_32_BLOCK_DIM,
+            device=device,
+        )
+
+    assert_np_equal(C_wp.numpy(), 0.5 * A @ B - 1.3 * C, tol=1e-2)
+
+    adj_C = np.ones_like(C)
+
+    tape.backward(grads={C_wp: wp.array(adj_C, device=device)})
+
+    assert_np_equal(A_wp.grad.numpy(), 0.5 * adj_C @ B.T, tol=1e-2)
+    assert_np_equal(B_wp.grad.numpy(), 0.5 * A.T @ adj_C, tol=1e-2)
+    assert_np_equal(C_wp.grad.numpy(), -1.3 * adj_C, tol=1e-2)
+
+
+# Reassigning tile variables inside the dynamic loop is not differentiable.
+@wp.kernel(module="test_tile_matmul_32", enable_backward=False)
+def tile_pipelined_gemm_kernel(A: wp.array2d[float], B: wp.array2d[float], C: wp.array2d[float]):
+    i, j = wp.tid()
+
+    sum = wp.tile_zeros(shape=(TILE_M, TILE_N), dtype=wp.float32)
+    a = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(i * TILE_M, 0), storage="register")
+    b = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(0, j * TILE_N), storage="register")
+
+    count = int(A.shape[1] / TILE_K)
+    for k in range(1, count):
+        a_next = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(i * TILE_M, k * TILE_K), storage="register")
+        b_next = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(k * TILE_K, j * TILE_N), storage="register")
+
+        wp.tile_matmul(a, b, sum)
+        a = a_next
+        b = b_next
+
+    wp.tile_matmul(a, b, sum)
+    wp.tile_store(C, sum, offset=(i * TILE_M, j * TILE_N))
+
+
+@wp.kernel(module="test_tile_matmul_32")
+def tile_reassign_after_matmul_kernel(
+    A: wp.array2d[float],
+    B: wp.array2d[float],
+    C_sum: wp.array2d[float],
+    C_reassigned: wp.array2d[float],
+    C_direct: wp.array2d[float],
+):
+    a = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(0, 0), storage="register")
+    b = wp.tile_load(B, shape=(TILE_K, TILE_N), offset=(0, 0), storage="register")
+
+    sum = wp.tile_zeros(shape=(TILE_M, TILE_N), dtype=wp.float32)
+    wp.tile_matmul(a, b, sum)
+    wp.tile_store(C_sum, sum)
+
+    a_next = wp.tile_load(A, shape=(TILE_M, TILE_K), offset=(TILE_M, 0), storage="register")
+    a = a_next
+
+    wp.tile_store(C_reassigned, a)
+    wp.tile_store(C_direct, a_next)
+
+
+def test_tile_matmul_pipelined_reassign(test, device):
+    """Exercise register-tile reassignment in a forward-only pipelined GEMM.
+
+    The dynamic loop reassigns tile variables after each multiplication. This
+    path is intentionally forward-only because those loop-carried assignments
+    are not differentiable.
+    """
+
+    M = TILE_M * 3
+    K = TILE_K * 3
+    N = TILE_N * 5
+
+    rng = np.random.default_rng(42)
+    A = rng.random((M, K), dtype=np.float32)
+    B = rng.random((K, N), dtype=np.float32)
+    C = np.zeros((M, N), dtype=np.float32)
+
+    A_wp = wp.array(A, device=device)
+    B_wp = wp.array(B, device=device)
+    C_wp = wp.array(C, device=device)
+
+    wp.launch_tiled(
+        tile_pipelined_gemm_kernel,
+        dim=(int(M / TILE_M), int(N / TILE_N)),
+        inputs=[A_wp, B_wp, C_wp],
+        block_dim=MATMUL_32_BLOCK_DIM,
+        device=device,
+    )
+
+    assert_np_equal(C_wp.numpy(), A @ B, tol=1.0e-4)
+
+
+def test_tile_matmul_reassign_backward(test, device):
+    """Propagate gradients through register-to-shared tile reassignment.
+
+    Keep the reassignment outside a dynamic loop to isolate the supported
+    assignment adjoint used by pipelined tile multiplication.
+    """
+
+    M = TILE_M * 2
+    K = TILE_K
+    N = TILE_N
+
+    rng = np.random.default_rng(42)
+    A = rng.random((M, K), dtype=np.float32)
+    B = rng.random((K, N), dtype=np.float32)
+    C_sum = np.zeros((TILE_M, TILE_N), dtype=np.float32)
+    C_reassigned = np.zeros((TILE_M, TILE_K), dtype=np.float32)
+    C_direct = np.zeros((TILE_M, TILE_K), dtype=np.float32)
+
+    A_wp = wp.array(A, requires_grad=True, device=device)
+    B_wp = wp.array(B, requires_grad=True, device=device)
+    C_sum_wp = wp.array(C_sum, requires_grad=True, device=device)
+    C_reassigned_wp = wp.array(C_reassigned, requires_grad=True, device=device)
+    C_direct_wp = wp.array(C_direct, requires_grad=True, device=device)
+
+    with wp.Tape() as tape:
+        wp.launch_tiled(
+            tile_reassign_after_matmul_kernel,
+            dim=1,
+            inputs=[A_wp, B_wp, C_sum_wp, C_reassigned_wp, C_direct_wp],
+            block_dim=MATMUL_32_BLOCK_DIM,
+            device=device,
+        )
+
+    assert_np_equal(C_sum_wp.numpy(), A[:TILE_M, :] @ B, tol=1.0e-4)
+    assert_np_equal(C_reassigned_wp.numpy(), A[TILE_M:, :], tol=1.0e-4)
+    assert_np_equal(C_direct_wp.numpy(), A[TILE_M:, :], tol=1.0e-4)
+
+    adj_sum = np.ones_like(C_sum)
+    adj_reassigned = np.ones_like(C_reassigned)
+    adj_direct = np.ones_like(C_direct)
+    tape.backward(
+        grads={
+            C_sum_wp: wp.array(adj_sum, device=device),
+            C_reassigned_wp: wp.array(adj_reassigned, device=device),
+            C_direct_wp: wp.array(adj_direct, device=device),
+        }
+    )
+
+    expected_A_grad = np.zeros_like(A)
+    expected_A_grad[:TILE_M, :] = adj_sum @ B.T
+    expected_A_grad[TILE_M:, :] = adj_reassigned + adj_direct
+    assert_np_equal(A_wp.grad.numpy(), expected_A_grad, tol=1.0e-4)
+    assert_np_equal(B_wp.grad.numpy(), A[:TILE_M, :].T @ adj_sum, tol=1.0e-4)
 
 
 @wp.kernel
@@ -430,9 +609,7 @@ class TestTileMatmul(unittest.TestCase):
 devices = get_test_devices()
 
 # bfloat16 requires CC >= 8.0 (Ampere+)
-bf16_devices = []
-if wp.is_cpu_available():
-    bf16_devices.append("cpu")
+bf16_devices = get_cpu_test_devices()
 for cuda_device in get_selected_cuda_test_devices():
     if cuda_device.arch >= 80:
         bf16_devices.append(cuda_device)
@@ -482,10 +659,31 @@ add_function_test(
 add_function_test(TestTileMatmul, "test_tile_gemm_fp32", test_tile_gemm(wp.float32), devices=devices)
 add_function_test(TestTileMatmul, "test_tile_gemm_fp64", test_tile_gemm(wp.float64), devices=devices)
 add_function_test(TestTileMatmul, "test_tile_grouped_gemm", test_tile_grouped_gemm, devices=devices)
+add_function_test(
+    TestTileMatmul,
+    "test_tile_matmul_mixed_precision",
+    test_tile_matmul_mixed_precision,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestTileMatmul,
+    "test_tile_matmul_pipelined_reassign",
+    test_tile_matmul_pipelined_reassign,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestTileMatmul,
+    "test_tile_matmul_reassign_backward",
+    test_tile_matmul_reassign_backward,
+    devices=devices,
+    check_output=False,
+)
 add_function_test(TestTileMatmul, "test_tile_transpose_matmul", test_tile_transpose_matmul, devices=devices)
 add_function_test(TestTileMatmul, "test_tile_matmul_return_form", test_tile_matmul_return_form, devices=devices)
 
-cpu_devices = ["cpu"] if wp.is_cpu_available() else []
+cpu_devices = get_cpu_test_devices()
 for name, func in (
     ("test_tile_gemm_fp32_cpu_blocks", test_tile_gemm(wp.float32)),
     ("test_tile_grouped_gemm_cpu_blocks", test_tile_grouped_gemm),

@@ -143,6 +143,13 @@ def get_selected_cuda_test_devices(mode: str | None = None):
     return selected_cuda_devices
 
 
+def get_cpu_test_devices():
+    """Return a list containing the CPU test device when available."""
+    if wp.is_cpu_available():
+        return [wp.get_device("cpu")]
+    return []
+
+
 def get_test_devices(mode: str | None = None):
     """Return devices based on the selected mode.
 
@@ -162,14 +169,12 @@ def get_test_devices(mode: str | None = None):
 
     if mode == "basic":
         # only run on CPU and first GPU device
-        if wp.is_cpu_available():
-            devices.append(wp.get_device("cpu"))
+        devices.extend(get_cpu_test_devices())
         if wp.is_cuda_available():
             devices.append(wp.get_device("cuda:0"))
     elif mode == "unique" or mode == "unique_or_2x":
         # run on CPU and a subset of GPUs
-        if wp.is_cpu_available():
-            devices.append(wp.get_device("cpu"))
+        devices.extend(get_cpu_test_devices())
         devices.extend(get_selected_cuda_test_devices(mode))
     elif mode == "all":
         # run on all devices

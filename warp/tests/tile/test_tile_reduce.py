@@ -379,7 +379,8 @@ def create_tile_reduce_custom_kernel(tile_dim: int):
     return tile_reduce_custom_kernel
 
 
-def test_tile_reduce_custom(test, device, block_dim=TILE_DIM):
+def test_tile_reduce_product(test, device, block_dim=TILE_DIM):
+    """Reduce tiles with multiplication across the requested block dimension."""
     batch_count = 56
 
     N = block_dim
@@ -641,7 +642,8 @@ def create_tile_reduce_custom_struct_kernel(tile_dim: int):
     return tile_reduce_custom_struct_kernel
 
 
-def test_tile_reduce_custom_struct(test, device, block_dim=TILE_DIM):
+def test_tile_reduce_custom_struct_argmax(test, device, block_dim=TILE_DIM):
+    """Select the largest keyed struct with a custom tile reduction."""
     batch_count = 56
 
     N = block_dim
@@ -801,7 +803,8 @@ def tile_reduce_axis_tier3_sum_axis2_kernel(x: wp.array3d[float], y: wp.array2d[
     wp.tile_store(y, b)
 
 
-def test_tile_reduce_axis_tier1(test, device, block_dim=TILE_DIM):
+def test_tile_reduce_axis_lengths_up_to_32(test, device, block_dim=TILE_DIM):
+    """Reduce axes no longer than 32 elements across dimensions and gradients."""
     # 2D sum: axis=0, size 32 (forward and backward)
     x = wp.ones((32, 64), dtype=float, requires_grad=True, device=device)
     y = wp.zeros(64, dtype=float, requires_grad=True, device=device)
@@ -855,7 +858,8 @@ def test_tile_reduce_axis_tier1(test, device, block_dim=TILE_DIM):
     assert_np_equal(x.grad.numpy(), np.ones((8, 8, 16), dtype=float))
 
 
-def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
+def test_tile_reduce_axis_lengths_33_to_256(test, device, block_dim=TILE_DIM):
+    """Reduce axes from 33 through 256 elements across dimensions and gradients."""
     # 2D sum: axis=0, size 200 (forward and backward)
     x = wp.ones((200, 32), dtype=float, requires_grad=True, device=device)
     y = wp.zeros(32, dtype=float, requires_grad=True, device=device)
@@ -909,7 +913,8 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
     assert_np_equal(x.grad.numpy(), np.ones((8, 8, 128), dtype=float))
 
 
-def test_tile_reduce_axis_tier3(test, device, block_dim=TILE_DIM):
+def test_tile_reduce_axis_lengths_over_256(test, device, block_dim=TILE_DIM):
+    """Reduce axes longer than 256 elements across dimensions and gradients."""
     # 2D sum: axis=0, size 400 (forward and backward)
     x = wp.ones((400, 16), dtype=float, requires_grad=True, device=device)
     y = wp.zeros(16, dtype=float, requires_grad=True, device=device)
@@ -1103,131 +1108,6 @@ def test_tile_reduce_axis_empty_custom_slices(test, device):
     test.assertIn("operator has no declared identity", result.stderr)
 
 
-@wp.kernel
-def tile_untile_kernel(output: wp.array[int]):
-    # thread index
-    i = wp.tid()
-
-    # convert to block wide tile
-    t = wp.tile(i) * 2
-    s = wp.untile(t)
-
-    output[i] = s
-
-
-def test_tile_untile(test, device):
-    # use an unaligned grid dimension
-    N = TILE_DIM * 4 + 5
-
-    output = wp.zeros(shape=N, dtype=int, requires_grad=True, device=device)
-
-    with wp.Tape():
-        wp.launch(tile_untile_kernel, dim=N, inputs=[output], block_dim=TILE_DIM, device=device)
-
-    assert_np_equal(output.numpy(), np.arange(N) * 2)
-
-
-@wp.kernel
-def tile_untile_scalar_kernel(output: wp.array[int]):
-    # thread index
-    i = wp.tid()
-
-    # convert to block wide tile
-    t = wp.tile(i) * 2
-    s = wp.untile(t)
-
-    output[i] = s
-
-
-def test_tile_untile_scalar(test, device):
-    # use an unaligned grid dimension
-    N = TILE_DIM * 4 + 5
-
-    output = wp.zeros(shape=N, dtype=int, requires_grad=True, device=device)
-
-    with wp.Tape():
-        wp.launch(tile_untile_kernel, dim=N, inputs=[output], block_dim=TILE_DIM, device=device)
-
-    assert_np_equal(output.numpy(), np.arange(N) * 2)
-
-
-@wp.kernel
-def test_untile_vector_kernel(input: wp.array[wp.vec3], output: wp.array[wp.vec3]):
-    i = wp.tid()
-
-    v = input[i] * 0.5
-
-    t = wp.tile(v)
-    u = wp.untile(t)
-
-    output[i] = u * 2.0
-
-
-def test_tile_untile_vector(test, device):
-    input = wp.full(TILE_DIM, wp.vec3(1.0, 2.0, 3.0), requires_grad=True, device=device)
-    output = wp.zeros_like(input, device=device)
-
-    with wp.Tape() as tape:
-        wp.launch(test_untile_vector_kernel, dim=TILE_DIM, inputs=[input, output], block_dim=TILE_DIM, device=device)
-
-    output.grad = wp.ones_like(output, device=device)
-    tape.backward()
-
-    assert_np_equal(output.numpy(), input.numpy())
-    assert_np_equal(input.grad.numpy(), np.ones((TILE_DIM, 3)))
-
-
-@wp.kernel
-def tile_ones_kernel(out: wp.array[float]):
-    i = wp.tid()
-
-    t = wp.tile_ones(dtype=float, shape=(16, 16))
-    s = wp.tile_sum(t)
-
-    wp.tile_store(out, s)
-
-
-def test_tile_ones(test, device):
-    output = wp.zeros(1, dtype=float, device=device)
-
-    with wp.Tape():
-        wp.launch_tiled(tile_ones_kernel, dim=[1], inputs=[output], block_dim=TILE_DIM, device=device)
-
-    test.assertAlmostEqual(output.numpy()[0], 256.0)
-
-
-@wp.kernel
-def tile_arange_kernel(out: wp.array2d[int]):
-    i = wp.tid()
-
-    a = wp.tile_arange(17, dtype=int)
-    b = wp.tile_arange(5, 23, dtype=int)
-    c = wp.tile_arange(0, 34, 2, dtype=int)
-    d = wp.tile_arange(-1, 16, dtype=int)
-    e = wp.tile_arange(17, 0, -1, dtype=int)
-
-    wp.tile_store(out[0], a)
-    wp.tile_store(out[1], b)
-    wp.tile_store(out[2], c)
-    wp.tile_store(out[3], d)
-    wp.tile_store(out[4], e)
-
-
-def test_tile_arange(test, device):
-    N = 17
-
-    output = wp.zeros(shape=(5, N), dtype=int, device=device)
-
-    with wp.Tape():
-        wp.launch_tiled(tile_arange_kernel, dim=[1], inputs=[output], block_dim=TILE_DIM, device=device)
-
-    assert_np_equal(output.numpy()[0], np.arange(17))
-    assert_np_equal(output.numpy()[1], np.arange(5, 22))
-    assert_np_equal(output.numpy()[2], np.arange(0, 34, 2))
-    assert_np_equal(output.numpy()[3], np.arange(-1, 16))
-    assert_np_equal(output.numpy()[4], np.arange(17, 0, -1))
-
-
 @wp.kernel(module="unique")
 def tile_strided_loop_kernel(arr: wp.array[float], max_val: wp.array[float]):
     _tid, lane = wp.tid()
@@ -1253,7 +1133,8 @@ def tile_strided_loop_kernel(arr: wp.array[float], max_val: wp.array[float]):
         max_val[0] = thread_max
 
 
-def test_tile_strided_loop(test, device):
+def test_tile_max_strided_loop_handles_short_input(test, device):
+    """Find the maximum of a short input through a block-strided tile loop."""
     N = 5  # Length of array
 
     rng = np.random.default_rng(42)
@@ -1320,7 +1201,7 @@ def test_tile_reduce_vector(test, device, block_dim=TILE_DIM):
 
 
 devices = get_test_devices()
-cpu_devices = [device for device in devices if device.is_cpu]
+cpu_devices = get_cpu_test_devices()
 
 
 class TestTileReduce(unittest.TestCase):
@@ -1339,41 +1220,65 @@ add_function_test(TestTileReduce, "test_tile_reduce_min", test_tile_reduce_min, 
 add_function_test(TestTileReduce, "test_tile_reduce_max", test_tile_reduce_max, devices=devices)
 add_function_test(TestTileReduce, "test_tile_reduce_argmin", test_tile_reduce_argmin, devices=devices)
 add_function_test(TestTileReduce, "test_tile_reduce_argmax", test_tile_reduce_argmax, devices=devices)
-add_function_test(TestTileReduce, "test_tile_reduce_custom", test_tile_reduce_custom, devices=devices)
-add_function_test(
-    TestTileReduce, "test_tile_reduce_custom_single_warp", test_tile_reduce_custom, devices=devices, block_dim=32
-)
-add_function_test(TestTileReduce, "test_tile_reduce_custom_struct", test_tile_reduce_custom_struct, devices=devices)
+add_function_test(TestTileReduce, "test_tile_reduce_product", test_tile_reduce_product, devices=devices)
 add_function_test(
     TestTileReduce,
-    "test_tile_reduce_custom_struct_single_warp",
-    test_tile_reduce_custom_struct,
+    "test_tile_reduce_product_single_warp",
+    test_tile_reduce_product,
+    devices=devices,
+    block_dim=32,
+)
+add_function_test(
+    TestTileReduce,
+    "test_tile_reduce_custom_struct_argmax",
+    test_tile_reduce_custom_struct_argmax,
+    devices=devices,
+)
+add_function_test(
+    TestTileReduce,
+    "test_tile_reduce_custom_struct_argmax_single_warp",
+    test_tile_reduce_custom_struct_argmax,
     devices=devices,
     block_dim=32,
 )
 add_function_test(TestTileReduce, "test_tile_reduce_grouped_sum", test_tile_reduce_grouped_sum, devices=devices)
 add_function_test(TestTileReduce, "test_tile_reduce_simt", test_tile_reduce_simt, devices=devices)
-add_function_test(TestTileReduce, "test_tile_reduce_axis_tier1", test_tile_reduce_axis_tier1, devices=devices)
 add_function_test(
     TestTileReduce,
-    "test_tile_reduce_axis_tier1_single_warp",
-    test_tile_reduce_axis_tier1,
+    "test_tile_reduce_axis_lengths_up_to_32",
+    test_tile_reduce_axis_lengths_up_to_32,
+    devices=devices,
+)
+add_function_test(
+    TestTileReduce,
+    "test_tile_reduce_axis_lengths_up_to_32_single_warp",
+    test_tile_reduce_axis_lengths_up_to_32,
     devices=devices,
     block_dim=32,
 )
-add_function_test(TestTileReduce, "test_tile_reduce_axis_tier2", test_tile_reduce_axis_tier2, devices=devices)
 add_function_test(
     TestTileReduce,
-    "test_tile_reduce_axis_tier2_single_warp",
-    test_tile_reduce_axis_tier2,
+    "test_tile_reduce_axis_lengths_33_to_256",
+    test_tile_reduce_axis_lengths_33_to_256,
+    devices=devices,
+)
+add_function_test(
+    TestTileReduce,
+    "test_tile_reduce_axis_lengths_33_to_256_single_warp",
+    test_tile_reduce_axis_lengths_33_to_256,
     devices=devices,
     block_dim=32,
 )
-add_function_test(TestTileReduce, "test_tile_reduce_axis_tier3", test_tile_reduce_axis_tier3, devices=devices)
 add_function_test(
     TestTileReduce,
-    "test_tile_reduce_axis_tier3_single_warp",
-    test_tile_reduce_axis_tier3,
+    "test_tile_reduce_axis_lengths_over_256",
+    test_tile_reduce_axis_lengths_over_256,
+    devices=devices,
+)
+add_function_test(
+    TestTileReduce,
+    "test_tile_reduce_axis_lengths_over_256_single_warp",
+    test_tile_reduce_axis_lengths_over_256,
     devices=devices,
     block_dim=32,
 )
@@ -1398,11 +1303,12 @@ add_function_test(
     devices=cpu_devices,
     enable_cpu_blocks=True,
 )
-add_function_test(TestTileReduce, "test_tile_ones", test_tile_ones, devices=devices)
-add_function_test(TestTileReduce, "test_tile_arange", test_tile_arange, devices=devices)
-add_function_test(TestTileReduce, "test_tile_untile_scalar", test_tile_untile_scalar, devices=devices)
-add_function_test(TestTileReduce, "test_tile_untile_vector", test_tile_untile_vector, devices=devices)
-add_function_test(TestTileReduce, "test_tile_strided_loop", test_tile_strided_loop, devices=devices)
+add_function_test(
+    TestTileReduce,
+    "test_tile_max_strided_loop_handles_short_input",
+    test_tile_max_strided_loop_handles_short_input,
+    devices=devices,
+)
 add_function_test(TestTileReduce, "test_tile_scan_inclusive", test_tile_scan_inclusive, devices=devices)
 add_function_test(TestTileReduce, "test_tile_scan_exclusive", test_tile_scan_exclusive, devices=devices)
 add_function_test(TestTileReduce, "test_tile_scan_max_inclusive", test_tile_scan_max_inclusive, devices=devices)
@@ -1421,8 +1327,8 @@ add_function_test(
 for block_dim in (31, 32, 63, 64, 65):
     add_function_test(
         TestTileReduce,
-        f"test_tile_reduce_custom_cpu_block_{block_dim}",
-        test_tile_reduce_custom,
+        f"test_tile_reduce_product_cpu_block_{block_dim}",
+        test_tile_reduce_product,
         devices=cpu_devices,
         block_dim=block_dim,
         enable_cpu_blocks=True,

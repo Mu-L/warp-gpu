@@ -239,14 +239,14 @@ add_function_test(
     TestTileLoadIndexed,
     "test_tile_load_indexed_cpu_blocks",
     test_tile_load_indexed,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileLoadIndexed,
     "test_tile_store_indexed_cpu_blocks",
     test_tile_store_indexed,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(TestTileLoadIndexed, "test_tile_load_indexed", test_tile_load_indexed, devices=devices)

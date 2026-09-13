@@ -62,6 +62,7 @@ def test_tile_shared_mem_cpu_limit(test, device):
 
 # checks that we can configure shared memory to the expected size
 def test_tile_shared_mem_size(test, device):
+    """Report the forward and backward shared-memory requirements."""
     DIM_M = 32
     DIM_N = 32
 
@@ -90,12 +91,13 @@ def test_tile_shared_mem_size(test, device):
     module_exec = compute.module.load(device, BLOCK_DIM)
     hooks = module_exec.get_kernel_hooks(compute)
 
-    assert hooks.forward_smem_bytes == expected_forward_bytes
-    assert hooks.backward_smem_bytes == expected_backward_bytes
+    test.assertEqual(hooks.forward_smem_bytes, expected_forward_bytes)
+    test.assertEqual(hooks.backward_smem_bytes, expected_backward_bytes)
 
 
 # checks that we can configure shared memory > 48kb default
-def test_tile_shared_mem_large(test, device):
+def test_tile_shared_memory_supports_64_kib_allocation(test, device):
+    """Configure and report a 64 KiB dynamic shared-memory allocation."""
     # set dimensions that require 64kb for the forward kernel
     DIM_M = 64
     DIM_N = 128
@@ -122,14 +124,14 @@ def test_tile_shared_mem_large(test, device):
     expected_forward_bytes = DIM_M * DIM_N * 4 * 2
     expected_backward_bytes = 0
 
-    assert expected_forward_bytes == 2**16
+    test.assertEqual(expected_forward_bytes, 2**16)
 
     # check shared memory for kernel on the device
     module_exec = compute.module.load(device, BLOCK_DIM)
     hooks = module_exec.get_kernel_hooks(compute)
 
-    assert hooks.forward_smem_bytes == expected_forward_bytes
-    assert hooks.backward_smem_bytes == expected_backward_bytes
+    test.assertEqual(hooks.forward_smem_bytes, expected_forward_bytes)
+    test.assertEqual(hooks.backward_smem_bytes, expected_backward_bytes)
 
 
 STATIC_QUERY_DIM = 32
@@ -443,6 +445,7 @@ def test_tile_shared_mem_deterministic_launch_message(test, device):
 
 # checks shared tile state during graph replay and CUDA dynamic shared memory configuration
 def test_tile_shared_mem_graph(test, device):
+    """Preserve block dimensions and shared-memory requirements during graph replay."""
     DIM_M = 32
     DIM_N = 32
 
@@ -484,12 +487,13 @@ def test_tile_shared_mem_graph(test, device):
         module_exec = compute.module.load(device, BLOCK_DIM)
         hooks = module_exec.get_kernel_hooks(compute)
 
-        assert hooks.forward_smem_bytes == expected_forward_bytes
-        assert hooks.backward_smem_bytes == expected_backward_bytes
+        test.assertEqual(hooks.forward_smem_bytes, expected_forward_bytes)
+        test.assertEqual(hooks.backward_smem_bytes, expected_backward_bytes)
 
 
 # checks that stack allocations work for user functions
-def test_tile_shared_mem_func(test, device):
+def test_tile_function_allocations_use_peak_shared_memory(test, device):
+    """Report the peak shared-memory allocation across tile function calls."""
     DIM_M = 64
     DIM_N = 64
 
@@ -530,8 +534,8 @@ def test_tile_shared_mem_func(test, device):
     # ensure that total required dynamic shared is the larger of the two tiles
     expected_required_shared = 64 * 64 * 4 * 2
 
-    assert hooks.forward_smem_bytes == expected_required_shared
-    assert hooks.backward_smem_bytes == expected_required_shared * 2
+    test.assertEqual(hooks.forward_smem_bytes, expected_required_shared)
+    test.assertEqual(hooks.backward_smem_bytes, expected_required_shared * 2)
 
 
 def round_up(a, b):
@@ -540,6 +544,7 @@ def round_up(a, b):
 
 # checks that using non-16B aligned sizes work
 def test_tile_shared_non_aligned(test, device):
+    """Allocate non-16-byte-aligned shared tiles without corrupting the stack."""
     # Tile size = 4 (float) * 1 * 3 = 12B % 16 != 0
     DIM_M = 1
     DIM_N = 3
@@ -575,8 +580,8 @@ def test_tile_shared_non_aligned(test, device):
     # ensure that total required dynamic shared is the larger of the two tiles
     expected_required_shared = 3 * round_up(DIM_M * DIM_N * 4, 16)
 
-    assert hooks.forward_smem_bytes == expected_required_shared
-    assert hooks.backward_smem_bytes == expected_required_shared * 2
+    test.assertEqual(hooks.forward_smem_bytes, expected_required_shared)
+    test.assertEqual(hooks.backward_smem_bytes, expected_required_shared * 2)
 
 
 def test_tile_shared_vec_accumulation(test, device):
@@ -640,7 +645,8 @@ def test_tile_shared_vec_accumulation(test, device):
     assert_np_equal(vecs.grad.numpy(), true_grads)
 
 
-def test_tile_shared_simple_reduction_add(test, device):
+def test_tile_shared_manual_reduction_add(test, device):
+    """Reduce a shared tile manually with in-place addition."""
     BLOCK_DIM = 256
 
     @wp.kernel(module="unique")
@@ -667,7 +673,8 @@ def test_tile_shared_simple_reduction_add(test, device):
     assert_np_equal(np.sum(y.numpy()), np.sum(x_np))
 
 
-def test_tile_shared_simple_reduction_sub(test, device):
+def test_tile_shared_manual_reduction_sub(test, device):
+    """Reduce a shared tile manually with in-place subtraction."""
     BLOCK_DIM = 256
 
     @wp.kernel(module="unique")
@@ -694,8 +701,8 @@ def test_tile_shared_simple_reduction_sub(test, device):
     assert_np_equal(np.sum(y.numpy()), 0.0)
 
 
-def test_tile_scatter_add_basic(test, device):
-    """Verify distinct per-thread scatter additions."""
+def test_tile_scatter_add_distinct_indices(test, device):
+    """Write distinct per-thread values with ``tile_scatter_add()``."""
     TILE_SIZE = 64
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -774,8 +781,8 @@ def test_tile_scatter_add_2d(test, device):
     assert_np_equal(out.numpy(), expected)
 
 
-def test_tile_scatter_add_grad_basic(test, device):
-    """Verify that gradient flows through tile_scatter_add: output = input * 2 via shared tile."""
+def test_tile_scatter_add_grad_distinct_indices(test, device):
+    """Propagate gradients through distinct per-thread ``tile_scatter_add()`` writes."""
     TILE_SIZE = 64
 
     @wp.kernel(module="unique")
@@ -1019,8 +1026,8 @@ def test_tile_register_from_shared_reassign(test, device):
     np.testing.assert_allclose(overwritten.grad.numpy(), np.zeros(TILE_SIZE, dtype=np.float32))
 
 
-def test_tile_scatter_masked_basic(test, device):
-    """Verify distinct per-thread masked scatter writes."""
+def test_tile_scatter_masked_distinct_indices(test, device):
+    """Write distinct per-thread values with ``tile_scatter_masked()``."""
     TILE_SIZE = 64
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -1149,8 +1156,8 @@ def test_tile_scatter_masked_4d(test, device):
     np.testing.assert_array_equal(out.numpy(), expected)
 
 
-def test_tile_scatter_masked_grad_basic(test, device):
-    """Verify that gradient flows through tile_scatter_masked: output = input * 2 via shared tile."""
+def test_tile_scatter_masked_grad_distinct_indices(test, device):
+    """Propagate gradients through distinct per-thread ``tile_scatter_masked()`` writes."""
     TILE_SIZE = 64
 
     @wp.kernel(module="unique")
@@ -1344,27 +1351,31 @@ add_function_test(
     TestTileSharedMemory,
     "test_tile_shared_mem_cpu_limit",
     test_tile_shared_mem_cpu_limit,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
 )
 add_function_test(
     TestTileSharedMemory,
     "test_tile_register_from_shared_reassign_cpu_blocks",
     test_tile_register_from_shared_reassign,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileSharedMemory,
     "test_tile_scatter_masked_cross_thread_cpu_blocks",
     test_tile_scatter_masked_cross_thread,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileSharedMemory, "test_tile_shared_mem_size", test_tile_shared_mem_size, devices=devices, check_output=False
 )
 add_function_test(
-    TestTileSharedMemory, "test_tile_shared_mem_large", test_tile_shared_mem_large, devices=devices, check_output=False
+    TestTileSharedMemory,
+    "test_tile_shared_memory_supports_64_kib_allocation",
+    test_tile_shared_memory_supports_64_kib_allocation,
+    devices=devices,
+    check_output=False,
 )
 add_function_test(
     TestTileSharedMemory,
@@ -1377,27 +1388,37 @@ add_function_test(
     TestTileSharedMemory,
     "test_tile_shared_mem_graph_cpu_blocks",
     test_tile_shared_mem_graph,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
-add_function_test(TestTileSharedMemory, "test_tile_shared_mem_func", test_tile_shared_mem_func, devices=devices)
+add_function_test(
+    TestTileSharedMemory,
+    "test_tile_function_allocations_use_peak_shared_memory",
+    test_tile_function_allocations_use_peak_shared_memory,
+    devices=devices,
+)
 add_function_test(TestTileSharedMemory, "test_tile_shared_non_aligned", test_tile_shared_non_aligned, devices=devices)
 add_function_test(
     TestTileSharedMemory, "test_tile_shared_vec_accumulation", test_tile_shared_vec_accumulation, devices=devices
 )
 add_function_test(
     TestTileSharedMemory,
-    "test_tile_shared_simple_reduction_add",
-    test_tile_shared_simple_reduction_add,
+    "test_tile_shared_manual_reduction_add",
+    test_tile_shared_manual_reduction_add,
     devices=devices,
 )
 add_function_test(
     TestTileSharedMemory,
-    "test_tile_shared_simple_reduction_sub",
-    test_tile_shared_simple_reduction_sub,
+    "test_tile_shared_manual_reduction_sub",
+    test_tile_shared_manual_reduction_sub,
     devices=devices,
 )
-add_function_test(TestTileSharedMemory, "test_tile_scatter_add_basic", test_tile_scatter_add_basic, devices=devices)
+add_function_test(
+    TestTileSharedMemory,
+    "test_tile_scatter_add_distinct_indices",
+    test_tile_scatter_add_distinct_indices,
+    devices=devices,
+)
 add_function_test(
     TestTileSharedMemory, "test_tile_scatter_add_conflicting", test_tile_scatter_add_conflicting, devices=devices
 )
@@ -1405,13 +1426,16 @@ add_function_test(
     TestTileSharedMemory,
     "test_tile_scatter_add_conflicting_cpu_blocks",
     test_tile_scatter_add_conflicting,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(TestTileSharedMemory, "test_tile_scatter_add_partial", test_tile_scatter_add_partial, devices=devices)
 add_function_test(TestTileSharedMemory, "test_tile_scatter_add_2d", test_tile_scatter_add_2d, devices=devices)
 add_function_test(
-    TestTileSharedMemory, "test_tile_scatter_add_grad_basic", test_tile_scatter_add_grad_basic, devices=devices
+    TestTileSharedMemory,
+    "test_tile_scatter_add_grad_distinct_indices",
+    test_tile_scatter_add_grad_distinct_indices,
+    devices=devices,
 )
 add_function_test(
     TestTileSharedMemory, "test_tile_scatter_add_grad_partial", test_tile_scatter_add_grad_partial, devices=devices
@@ -1426,7 +1450,7 @@ add_function_test(
     TestTileSharedMemory,
     "test_tile_scatter_add_grad_conflicting_cpu_blocks",
     test_tile_scatter_add_grad_conflicting,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
@@ -1466,7 +1490,10 @@ add_function_test(
     devices=devices,
 )
 add_function_test(
-    TestTileSharedMemory, "test_tile_scatter_masked_basic", test_tile_scatter_masked_basic, devices=devices
+    TestTileSharedMemory,
+    "test_tile_scatter_masked_distinct_indices",
+    test_tile_scatter_masked_distinct_indices,
+    devices=devices,
 )
 add_function_test(
     TestTileSharedMemory, "test_tile_scatter_masked_partial", test_tile_scatter_masked_partial, devices=devices
@@ -1481,7 +1508,10 @@ add_function_test(TestTileSharedMemory, "test_tile_scatter_masked_2d", test_tile
 add_function_test(TestTileSharedMemory, "test_tile_scatter_masked_3d", test_tile_scatter_masked_3d, devices=devices)
 add_function_test(TestTileSharedMemory, "test_tile_scatter_masked_4d", test_tile_scatter_masked_4d, devices=devices)
 add_function_test(
-    TestTileSharedMemory, "test_tile_scatter_masked_grad_basic", test_tile_scatter_masked_grad_basic, devices=devices
+    TestTileSharedMemory,
+    "test_tile_scatter_masked_grad_distinct_indices",
+    test_tile_scatter_masked_grad_distinct_indices,
+    devices=devices,
 )
 add_function_test(
     TestTileSharedMemory,

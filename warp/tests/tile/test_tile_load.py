@@ -527,14 +527,14 @@ add_function_test(
     TestTileLoad,
     "test_tile_load_2d_cpu_blocks",
     test_tile_load(tile_load_2d_kernel, 2),
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileLoad,
     "test_tile_load_scoped_cpu_blocks",
     test_tile_load_scoped,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(

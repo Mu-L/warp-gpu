@@ -394,7 +394,7 @@ for name, func in (
         TestTileAtomicBitwise,
         f"{name}_cpu_blocks",
         func,
-        devices=["cpu"] if wp.is_cpu_available() else [],
+        devices=get_cpu_test_devices(),
         enable_cpu_blocks=True,
     )
 

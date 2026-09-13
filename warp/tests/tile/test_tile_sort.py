@@ -40,7 +40,8 @@ def create_sort_kernel(KEY_TYPE, MAX_SORT_LENGTH):
     return tile_sort_kernel
 
 
-def test_tile_sort(test, device):
+def test_tile_sort_keys_and_values_across_dtypes_and_sizes(test, device):
+    """Sort key-value pairs across supported data types, lengths, and block dimensions."""
     # Forward-declare kernels for more efficient compilation
     kernels = {}
     for dtype in [wp.int32, wp.int64, wp.uint64, wp.float32]:
@@ -139,7 +140,8 @@ def _run_large_cpu_tile_sort():
     print("ok")
 
 
-def test_tile_sort_large_cpu(test, device):
+def test_tile_sort_heap_backed_cpu(test, device):
+    """Sort 2,049 elements through the CPU heap-backed radix path."""
     result = subprocess.run(
         [sys.executable, "-u", "-c", "import warp.tests.tile.test_tile_sort as m; m._run_large_cpu_tile_sort()"],
         check=False,
@@ -275,7 +277,8 @@ def test_tile_sort_surviving_lane(test, device):
     _run_surviving_lane_cpu_tile_sort(17)
 
 
-def test_tile_sort_surviving_lane_large_cpu(test, device):
+def test_tile_sort_surviving_lane_heap_backed_cpu(test, device):
+    """Sort 2,049 elements after lane zero exits the CPU block."""
     result = subprocess.run(
         [
             sys.executable,
@@ -304,35 +307,45 @@ class TestTileSort(unittest.TestCase):
     pass
 
 
-add_function_test(TestTileSort, "test_tile_sort", test_tile_sort, devices=devices)
+add_function_test(
+    TestTileSort,
+    "test_tile_sort_keys_and_values_across_dtypes_and_sizes",
+    test_tile_sort_keys_and_values_across_dtypes_and_sizes,
+    devices=devices,
+)
 add_function_test(TestTileSort, "test_tile_sort_bfloat16_payload", test_tile_sort_bfloat16_payload, devices=devices)
-add_function_test(TestTileSort, "test_tile_sort_large_cpu", test_tile_sort_large_cpu, devices=["cpu"])
+add_function_test(
+    TestTileSort,
+    "test_tile_sort_heap_backed_cpu",
+    test_tile_sort_heap_backed_cpu,
+    devices=get_cpu_test_devices(),
+)
 add_function_test(
     TestTileSort,
     "test_tile_sort_surviving_lane",
     test_tile_sort_surviving_lane,
-    devices=["cpu"] if wp.is_cpu_available() else [],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileSort,
-    "test_tile_sort_surviving_lane_large_cpu",
-    test_tile_sort_surviving_lane_large_cpu,
-    devices=["cpu"] if wp.is_cpu_available() else [],
+    "test_tile_sort_surviving_lane_heap_backed_cpu",
+    test_tile_sort_surviving_lane_heap_backed_cpu,
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileSort,
-    "test_tile_sort_cpu_blocks",
-    test_tile_sort,
-    devices=["cpu"] if wp.is_cpu_available() else [],
+    "test_tile_sort_keys_and_values_across_dtypes_and_sizes_cpu_blocks",
+    test_tile_sort_keys_and_values_across_dtypes_and_sizes,
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(
     TestTileSort,
     "test_tile_sort_bfloat16_payload_cpu_blocks",
     test_tile_sort_bfloat16_payload,
-    devices=["cpu"] if wp.is_cpu_available() else [],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 

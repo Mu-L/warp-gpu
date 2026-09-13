@@ -15,7 +15,7 @@ ZERO_CAP = wp.constant(0)
 
 
 # ----------------------------------------------------------------
-# 1. push_all
+# 1. push_all_lanes
 # ----------------------------------------------------------------
 @wp.kernel
 def push_all_kernel(out: wp.array[int]):
@@ -27,7 +27,8 @@ def push_all_kernel(out: wp.array[int]):
         out[slot] = val
 
 
-def test_push_all(test, device):
+def test_push_all_lanes(test, device):
+    """Push every lane and preserve all stack values."""
     n = TILE_DIM
     out = wp.full(n, -1, dtype=int, device=device)
     wp.launch_tiled(push_all_kernel, dim=[1], inputs=[out], block_dim=TILE_DIM, device=device)
@@ -69,7 +70,7 @@ def test_push_partial(test, device):
 
 
 # ----------------------------------------------------------------
-# 3. overflow
+# 3. overflow_clamps_at_capacity
 # ----------------------------------------------------------------
 @wp.kernel
 def overflow_kernel(out_idx: wp.array[int], out_count: wp.array[int]):
@@ -81,7 +82,8 @@ def overflow_kernel(out_idx: wp.array[int], out_count: wp.array[int]):
     out_count[j] = count
 
 
-def test_overflow(test, device):
+def test_overflow_clamps_at_capacity(test, device):
+    """Clamp successful pushes and the reported count at capacity."""
     out_idx = wp.full(TILE_DIM, -2, dtype=int, device=device)
     out_count = wp.zeros(TILE_DIM, dtype=int, device=device)
     wp.launch_tiled(overflow_kernel, dim=[1], inputs=[out_idx, out_count], block_dim=TILE_DIM, device=device)
@@ -196,7 +198,7 @@ def test_pop_more_than_pushed(test, device):
 
 
 # ----------------------------------------------------------------
-# 7. multi_tile
+# 7. counts_are_independent_per_tile
 # ----------------------------------------------------------------
 @wp.kernel
 def multi_tile_kernel(out_counts: wp.array[int]):
@@ -209,7 +211,8 @@ def multi_tile_kernel(out_counts: wp.array[int]):
         out_counts[i] = count
 
 
-def test_multi_tile(test, device):
+def test_counts_are_independent_per_tile(test, device):
+    """Keep stack counts independent across tiles."""
     num_tiles = 4
     out_counts = wp.zeros(num_tiles, dtype=int, device=device)
     wp.launch_tiled(
@@ -283,7 +286,7 @@ def test_clear_resets_count(test, device):
 
 
 # ----------------------------------------------------------------
-# 10. float_dtype
+# 10. preserves_float_values
 # ----------------------------------------------------------------
 @wp.kernel
 def float_dtype_kernel(out: wp.array[float]):
@@ -295,7 +298,8 @@ def float_dtype_kernel(out: wp.array[float]):
         out[slot] = val
 
 
-def test_float_dtype(test, device):
+def test_preserves_float_values(test, device):
+    """Preserve floating-point values through stack pushes and pops."""
     n = TILE_DIM
     out = wp.full(n, -1.0, dtype=float, device=device)
     wp.launch_tiled(float_dtype_kernel, dim=[1], inputs=[out], block_dim=TILE_DIM, device=device)
@@ -442,7 +446,7 @@ def test_count_after_push(test, device):
 
 
 # ----------------------------------------------------------------
-# 15. two_stacks (LIFO deallocation of multiple stacks)
+# 15. stacks_are_independent (LIFO deallocation of multiple stacks)
 # ----------------------------------------------------------------
 @wp.kernel
 def two_stacks_kernel(out_ints: wp.array[int], out_floats: wp.array[float]):
@@ -459,7 +463,8 @@ def two_stacks_kernel(out_ints: wp.array[int], out_floats: wp.array[float]):
         out_floats[slot2] = val2
 
 
-def test_two_stacks(test, device):
+def test_stacks_are_independent(test, device):
+    """Keep simultaneously allocated stacks independent."""
     n = TILE_DIM
     out_ints = wp.full(n, -1, dtype=int, device=device)
     out_floats = wp.full(n, -1.0, dtype=float, device=device)
@@ -599,49 +604,59 @@ class TestTileStack(unittest.TestCase):
     pass
 
 
-add_function_test(TestTileStack, "test_push_all", test_push_all, devices=devices)
+add_function_test(TestTileStack, "test_push_all_lanes", test_push_all_lanes, devices=devices)
 add_function_test(TestTileStack, "test_push_partial", test_push_partial, devices=devices)
-add_function_test(TestTileStack, "test_overflow", test_overflow, devices=devices)
+add_function_test(
+    TestTileStack,
+    "test_overflow_clamps_at_capacity",
+    test_overflow_clamps_at_capacity,
+    devices=devices,
+)
 add_function_test(TestTileStack, "test_pop_empty", test_pop_empty, devices=devices)
 add_function_test(TestTileStack, "test_push_pop_clear_cycle", test_push_pop_clear_cycle, devices=devices)
 add_function_test(TestTileStack, "test_pop_more_than_pushed", test_pop_more_than_pushed, devices=devices)
-add_function_test(TestTileStack, "test_multi_tile", test_multi_tile, devices=devices)
+add_function_test(
+    TestTileStack,
+    "test_counts_are_independent_per_tile",
+    test_counts_are_independent_per_tile,
+    devices=devices,
+)
 add_function_test(
     TestTileStack, "test_has_value_false_returns_minus_one", test_has_value_false_returns_minus_one, devices=devices
 )
 add_function_test(TestTileStack, "test_clear_resets_count", test_clear_resets_count, devices=devices)
-add_function_test(TestTileStack, "test_float_dtype", test_float_dtype, devices=devices)
+add_function_test(TestTileStack, "test_preserves_float_values", test_preserves_float_values, devices=devices)
 add_function_test(TestTileStack, "test_overflow_data_integrity", test_overflow_data_integrity, devices=devices)
 add_function_test(TestTileStack, "test_vec3_dtype", test_vec3_dtype, devices=devices)
 add_function_test(TestTileStack, "test_float16_dtype", test_float16_dtype, devices=devices)
 add_function_test(TestTileStack, "test_count_after_push", test_count_after_push, devices=devices)
-add_function_test(TestTileStack, "test_two_stacks", test_two_stacks, devices=devices)
+add_function_test(TestTileStack, "test_stacks_are_independent", test_stacks_are_independent, devices=devices)
 add_function_test(TestTileStack, "test_pop_slot_compact", test_pop_slot_compact, devices=devices)
 add_function_test(TestTileStack, "test_func_tile_stack_arg", test_func_tile_stack_arg, devices=devices)
 add_function_test(
     TestTileStack,
     "test_sparse_survivor_stack",
     test_sparse_survivor_stack,
-    devices=["cpu"] if wp.is_cpu_available() else [],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 
 cpu_block_stack_tests = (
-    ("test_push_all", test_push_all),
+    ("test_push_all_lanes", test_push_all_lanes),
     ("test_push_partial", test_push_partial),
-    ("test_overflow", test_overflow),
+    ("test_overflow_clamps_at_capacity", test_overflow_clamps_at_capacity),
     ("test_pop_empty", test_pop_empty),
     ("test_push_pop_clear_cycle", test_push_pop_clear_cycle),
     ("test_pop_more_than_pushed", test_pop_more_than_pushed),
-    ("test_multi_tile", test_multi_tile),
+    ("test_counts_are_independent_per_tile", test_counts_are_independent_per_tile),
     ("test_has_value_false_returns_minus_one", test_has_value_false_returns_minus_one),
     ("test_clear_resets_count", test_clear_resets_count),
-    ("test_float_dtype", test_float_dtype),
+    ("test_preserves_float_values", test_preserves_float_values),
     ("test_overflow_data_integrity", test_overflow_data_integrity),
     ("test_vec3_dtype", test_vec3_dtype),
     ("test_float16_dtype", test_float16_dtype),
     ("test_count_after_push", test_count_after_push),
-    ("test_two_stacks", test_two_stacks),
+    ("test_stacks_are_independent", test_stacks_are_independent),
     ("test_pop_slot_compact", test_pop_slot_compact),
     ("test_func_tile_stack_arg", test_func_tile_stack_arg),
 )
@@ -650,7 +665,7 @@ for name, func in cpu_block_stack_tests:
         TestTileStack,
         f"{name}_cpu_blocks",
         func,
-        devices=["cpu"] if wp.is_cpu_available() else [],
+        devices=get_cpu_test_devices(),
         enable_cpu_blocks=True,
     )
 

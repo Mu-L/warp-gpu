@@ -1891,7 +1891,7 @@ add_function_test(
     TestTileStruct,
     "test_tile_map_custom_struct_forward_cpu_blocks",
     test_tile_map_custom_struct_forward,
-    devices=["cpu"],
+    devices=get_cpu_test_devices(),
     enable_cpu_blocks=True,
 )
 add_function_test(TestTileStruct, "test_tile_map_custom_struct", test_tile_map_custom_struct, devices=devices)
